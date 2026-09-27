@@ -77,7 +77,7 @@ part of the catalogue is ready early on.
 
 ## Deploying on Vercel
 
-Vercel runs the website and API as a serverless function (`api/index.py`,
+Vercel runs the website and API as a serverless function (`app.py`,
 `vercel.json`). Vercel functions can't keep a SQLite file or run for hours,
 so two pieces live elsewhere:
 

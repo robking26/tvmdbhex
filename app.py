@@ -1,13 +1,14 @@
 """Vercel entry point: serves the website and API as one serverless function.
 
-All paths are rewritten here by vercel.json. The database is Postgres
+vercel.json routes every path to this file via an explicit @vercel/python
+build, so it works regardless of the project's framework preset. The database is Postgres
 (DATABASE_URL / POSTGRES_URL, set by Vercel's Neon integration); the
 ingester runs separately as a GitHub Actions workflow.
 """
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from fastapi import FastAPI  # noqa: E402
 from fastapi.responses import JSONResponse  # noqa: E402

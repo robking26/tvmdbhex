@@ -1,4 +1,11 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "rewrites": [{ "source": "/(.*)", "destination": "/api/index" }]
+  "builds": [
+    {
+      "src": "app.py",
+      "use": "@vercel/python",
+      "config": { "includeFiles": ["tvmdbhex/**"] }
+    }
+  ],
+  "routes": [{ "src": "/(.*)", "dest": "/app.py" }]
 }
