@@ -31,8 +31,8 @@ POSTER = to_jpeg(make_poster([((20, 30, 120), 0.6), ((230, 40, 40), 0.25), ((240
 
 
 @pytest.fixture
-def settings(tmp_path):
-    return Settings(db_path=str(tmp_path / "t.db"), tmdb_read_token="t", requests_per_second=0)
+def settings(db_settings):
+    return Settings(**db_settings, tmdb_read_token="t", requests_per_second=0)
 
 
 @pytest.fixture
@@ -62,7 +62,7 @@ def run(coro):
 
 
 async def _full(settings):
-    conn = db.connect(settings.db_path)
+    conn = db.connect(settings.db_target)
     async with TMDBClient(read_token="t", requests_per_second=0) as client:
         seeded = await ingest.seed(conn, client, ["movie", "tv"])
         counts = await ingest.process(conn, client, settings)
@@ -99,7 +99,7 @@ def test_errors_are_recorded_and_retried(settings, mock_tmdb):
     mock_tmdb.get("https://api.themoviedb.org/3/movie/550").respond(status_code=401)
 
     async def go():
-        conn = db.connect(settings.db_path)
+        conn = db.connect(settings.db_target)
         db.upsert_seed(conn, "movie", [{"id": 550}])
         async with TMDBClient(read_token="t", requests_per_second=0) as client:
             first = await ingest.process(conn, client, settings)

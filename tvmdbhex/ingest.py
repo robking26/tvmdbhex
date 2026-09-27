@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sqlite3
 import time
 from datetime import date, timedelta
 
@@ -18,11 +17,15 @@ MAX_ATTEMPTS = 5
 CHANGES_MAX_WINDOW = 14  # days per TMDB /changes call
 
 
-async def seed(conn: sqlite3.Connection, client: TMDBClient, media_types: list[str]) -> dict:
+async def seed(conn: db.Connection, client: TMDBClient, media_types: list[str]) -> dict:
     """Load every title ID from TMDB's daily exports into the database."""
     counts = {}
     for media_type in media_types:
         day, payload = await client.daily_export(media_type)
+        if db.get_state(conn, f"seed:{media_type}") == day.isoformat():
+            log.info("%s export for %s already loaded", media_type, day)
+            counts[media_type] = 0
+            continue
         counts[media_type] = db.upsert_seed(conn, media_type, parse_export(media_type, payload))
         db.set_state(conn, f"seed:{media_type}", day.isoformat())
         # The export is a snapshot; changes since then are picked up by sync_changes.
@@ -39,7 +42,7 @@ async def _palette_for(client: TMDBClient, settings: Settings, poster_path: str)
 
 
 async def process_one(
-    conn: sqlite3.Connection,
+    conn: db.Connection,
     client: TMDBClient,
     settings: Settings,
     media_type: str,
@@ -89,11 +92,12 @@ async def process_one(
 
 
 async def process(
-    conn: sqlite3.Connection,
+    conn: db.Connection,
     client: TMDBClient,
     settings: Settings,
     media_type: str | None = None,
     limit: int | None = None,
+    max_minutes: float | None = None,
     retry_errors: bool = True,
 ) -> dict:
     """Extract colours for every pending title (most popular first)."""
@@ -106,9 +110,12 @@ async def process(
     counts: dict[str, int] = {}
     inflight: dict[str, asyncio.Task] = {}
     started = time.monotonic()
+    deadline = started + max_minutes * 60 if max_minutes else None
 
     async def worker() -> None:
         while True:
+            if deadline and time.monotonic() > deadline:
+                return  # out of time; the rest stays pending for the next run
             try:
                 mt, tmdb_id = queue.get_nowait()
             except asyncio.QueueEmpty:
@@ -131,7 +138,7 @@ async def process(
 
 
 async def sync_changes(
-    conn: sqlite3.Connection, client: TMDBClient, media_types: list[str], today: date | None = None
+    conn: db.Connection, client: TMDBClient, media_types: list[str], today: date | None = None
 ) -> dict:
     """Re-queue titles TMDB reports as changed (e.g. new poster) since the last sync."""
     today = today or date.today()

@@ -7,8 +7,11 @@ This service stands on its own. It's the only thing that talks to TMDB.
 Clients such as **Hoozat** call this API and never call TMDB themselves.
 
 ```
-TMDB ──(ingester)──> SQLite ──(read-only API)──> Hoozat
+TMDB ──(ingester)──> database ──(read-only API + website)──> Hoozat / you
 ```
+
+The database is SQLite locally, or Postgres when `DATABASE_URL` is set, as it
+is on Vercel.
 
 ## How it works
 
@@ -60,6 +63,7 @@ runs `tvmdbhex run` once a day, both sharing the same database volume.
 | Variable | Default | |
 |---|---|---|
 | `TMDB_READ_TOKEN` / `TMDB_API_KEY` | – | TMDB credentials (ingester only) |
+| `DATABASE_URL` / `POSTGRES_URL` | – | Postgres URL. Takes precedence over the SQLite file |
 | `TVMDBHEX_DB_PATH` | `data/tvmdbhex.db` | SQLite file |
 | `TVMDBHEX_API_KEYS` | *(empty = no auth)* | Comma-separated keys accepted in `X-API-Key` |
 | `TVMDBHEX_CONCURRENCY` | `16` | Parallel workers |
@@ -70,6 +74,40 @@ runs `tvmdbhex run` once a day, both sharing the same database volume.
 **First run:** TMDB lists roughly 1M+ movies and 200k+ series. At 40 req/s
 that takes about 8–9 hours. Popular titles are processed first, so the useful
 part of the catalogue is ready early on.
+
+## Deploying on Vercel
+
+Vercel runs the website and API as a serverless function (`api/index.py`,
+`vercel.json`). Vercel functions can't keep a SQLite file or run for hours,
+so two pieces live elsewhere:
+
+- **Database:** Postgres. The easiest route is Vercel → Storage → Create
+  Database → **Neon**, connected to this project. That sets `DATABASE_URL`
+  automatically.
+- **Ingester:** a GitHub Actions workflow (`.github/workflows/ingest.yml`)
+  that runs `tvmdbhex run` every 6 hours against the same database. The first
+  backfill (~9h) spreads over a couple of runs. After that each run takes
+  minutes.
+
+One-time setup:
+
+1. **Vercel → Storage:** create a Neon Postgres database and connect it to
+   the project. Redeploy once. Until a database is connected, every URL
+   returns a 503 explaining this.
+2. **Vercel → Settings → Environment Variables** (optional): add
+   `TVMDBHEX_API_KEYS` to require an `X-API-Key`.
+3. **GitHub → Settings → Secrets and variables → Actions:** add
+   `DATABASE_URL` (the same URL Vercel shows for the database) and
+   `TMDB_READ_TOKEN` (or `TMDB_API_KEY`).
+4. **GitHub → Actions → Ingest posters → Run workflow** to start the first
+   backfill now instead of waiting for the schedule. The site fills in as it
+   runs, most popular titles first.
+
+Every push to `main` redeploys the site.
+
+**Storage:** the full catalogue (~1.2M rows plus indexes) is roughly
+400–500 MB of Postgres. That's around the limit of Neon's free tier, so you
+may need a paid plan once the backfill completes.
 
 ## Website
 
@@ -144,6 +182,8 @@ Counts by status, and a liveness check.
 
 ```bash
 pytest
+# also run the storage tests against a throwaway Postgres database:
+TVMDBHEX_TEST_DATABASE_URL=postgresql://postgres:pg@localhost/tvmdbhex_test pytest
 ```
 
 TMDB is mocked in the tests, so they run offline.

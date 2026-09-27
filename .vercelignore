@@ -1,0 +1,8 @@
+tests/
+data/
+.github/
+Dockerfile
+docker-compose.yml
+*.db
+*.db-wal
+*.db-shm

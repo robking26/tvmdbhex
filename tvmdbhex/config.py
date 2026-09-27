@@ -13,6 +13,7 @@ def _bool(value: str | None, default: bool = False) -> bool:
 @dataclass(frozen=True)
 class Settings:
     db_path: str = "data/tvmdbhex.db"
+    database_url: str = ""
     tmdb_api_key: str = ""
     tmdb_read_token: str = ""
     api_keys: frozenset[str] = field(default_factory=frozenset)
@@ -21,11 +22,18 @@ class Settings:
     poster_size: str = "w185"
     include_adult: bool = False
 
+    @property
+    def db_target(self) -> str:
+        """Postgres URL when configured, otherwise the local SQLite path."""
+        return self.database_url or self.db_path
+
     @classmethod
     def from_env(cls) -> "Settings":
         keys = os.environ.get("TVMDBHEX_API_KEYS", "")
         return cls(
             db_path=os.environ.get("TVMDBHEX_DB_PATH", cls.db_path),
+            # Vercel's Neon/Postgres integrations set DATABASE_URL / POSTGRES_URL.
+            database_url=os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL") or "",
             tmdb_api_key=os.environ.get("TMDB_API_KEY", ""),
             tmdb_read_token=os.environ.get("TMDB_READ_TOKEN", ""),
             api_keys=frozenset(k.strip() for k in keys.split(",") if k.strip()),

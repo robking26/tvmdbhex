@@ -1,4 +1,9 @@
-"""SQLite storage shared by the ingester (writer) and the API (reader)."""
+"""Storage shared by the ingester (writer) and the API (reader).
+
+Two backends with one dialect of SQL (`?` placeholders):
+- SQLite for local use and tests (`TVMDBHEX_DB_PATH`)
+- Postgres for hosted deployments such as Vercel (`DATABASE_URL`)
+"""
 from __future__ import annotations
 
 import os
@@ -6,6 +11,8 @@ import sqlite3
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from itertools import islice
+from typing import Any
 
 MEDIA_TYPES = ("movie", "tv")
 
@@ -36,7 +43,6 @@ CREATE TABLE IF NOT EXISTS titles (
     updated_at      TEXT    NOT NULL,
     PRIMARY KEY (media_type, tmdb_id)
 );
-CREATE INDEX IF NOT EXISTS idx_titles_status ON titles (status, media_type);
 CREATE INDEX IF NOT EXISTS idx_titles_poster ON titles (poster_path);
 CREATE INDEX IF NOT EXISTS idx_titles_popularity ON titles (status, popularity DESC);
 
@@ -56,13 +62,103 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def connect(path: str, readonly: bool = False) -> sqlite3.Connection:
-    if path != ":memory:" and not readonly:
-        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+def is_postgres_url(target: str) -> bool:
+    return target.startswith(("postgres://", "postgresql://"))
+
+
+class SQLiteConnection(sqlite3.Connection):
+    dialect = "sqlite"
+
+
+class Row(tuple):
+    """Result row addressable by column name or position (like sqlite3.Row)."""
+
+    _index: dict[str, int]
+
+    def __new__(cls, values: Iterable[Any], index: dict[str, int]) -> "Row":
+        row = super().__new__(cls, values)
+        row._index = index
+        return row
+
+    def __getitem__(self, key):  # type: ignore[override]
+        if isinstance(key, str):
+            key = self._index[key]
+        return tuple.__getitem__(self, key)
+
+    def keys(self) -> list[str]:
+        return list(self._index)
+
+
+class PostgresConnection:
+    """Thin psycopg wrapper exposing the sqlite3 connection methods we use."""
+
+    dialect = "postgres"
+
+    def __init__(self, url: str, autocommit: bool = False):
+        import psycopg  # only needed for hosted deployments
+
+        def row_factory(cursor):
+            index = {d.name: i for i, d in enumerate(cursor.description or [])}
+            return lambda values: Row(values, index)
+
+        self._conn = psycopg.connect(url, autocommit=autocommit, row_factory=row_factory)
+
+    @staticmethod
+    def _sql(sql: str) -> str:
+        return sql.replace("?", "%s")
+
+    def execute(self, sql: str, params: Iterable[Any] = ()):
+        return self._conn.execute(self._sql(sql), tuple(params))
+
+    def executemany(self, sql: str, seq: Iterable[Iterable[Any]]) -> None:
+        with self._conn.cursor() as cur:
+            cur.executemany(self._sql(sql), [tuple(p) for p in seq])
+
+    def executescript(self, script: str) -> None:
+        for statement in script.split(";"):
+            if statement.strip():
+                self._conn.execute(statement)
+        if not self._conn.autocommit:
+            self._conn.commit()
+
+    def commit(self) -> None:
+        self._conn.commit()
+
+    def rollback(self) -> None:
+        self._conn.rollback()
+
+    def close(self) -> None:
+        self._conn.close()
+
+    @property
+    def closed(self) -> bool:
+        return self._conn.closed or self._conn.broken
+
+
+Connection = Any  # SQLiteConnection | PostgresConnection
+
+PG_SCHEMA = SCHEMA.replace(" REAL", " DOUBLE PRECISION")
+
+
+def connect(target: str, readonly: bool = False) -> Connection:
+    """Open the database at `target` (a SQLite path or a postgres:// URL).
+
+    `readonly` connections (used by the API) don't create the schema.
+    """
+    if is_postgres_url(target):
+        conn = PostgresConnection(target, autocommit=readonly)
+        if not readonly:
+            conn.executescript(PG_SCHEMA)
+        return conn
+
+    if target != ":memory:" and not readonly:
+        os.makedirs(os.path.dirname(os.path.abspath(target)), exist_ok=True)
     if readonly:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
+        conn = sqlite3.connect(
+            f"file:{target}?mode=ro", uri=True, check_same_thread=False, factory=SQLiteConnection
+        )
     else:
-        conn = sqlite3.connect(path, check_same_thread=False)
+        conn = sqlite3.connect(target, check_same_thread=False, factory=SQLiteConnection)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.executescript(SCHEMA)
@@ -71,8 +167,18 @@ def connect(path: str, readonly: bool = False) -> sqlite3.Connection:
     return conn
 
 
+def ensure_schema(conn: Connection) -> None:
+    conn.executescript(PG_SCHEMA if conn.dialect == "postgres" else SCHEMA)
+
+
+def _batches(items: Iterable, size: int = 5000) -> Iterator[list]:
+    it = iter(items)
+    while batch := list(islice(it, size)):
+        yield batch
+
+
 @contextmanager
-def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+def transaction(conn: Connection) -> Iterator[Connection]:
     try:
         yield conn
         conn.commit()
@@ -81,54 +187,57 @@ def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
         raise
 
 
-def upsert_seed(conn: sqlite3.Connection, media_type: str, rows: Iterable[dict]) -> int:
+def upsert_seed(conn: Connection, media_type: str, rows: Iterable[dict]) -> int:
     """Insert titles from a TMDB export. Existing rows keep their colours."""
     ts = now_iso()
     count = 0
-    with transaction(conn):
-        for row in rows:
-            conn.execute(
+    for batch in _batches(rows):
+        with transaction(conn):
+            conn.executemany(
                 """
                 INSERT INTO titles (media_type, tmdb_id, title, adult, popularity, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT (media_type, tmdb_id) DO UPDATE SET
-                    title = excluded.title,
+                    title = COALESCE(titles.title, excluded.title),
                     adult = excluded.adult,
                     popularity = excluded.popularity
                 """,
-                (
-                    media_type,
-                    row["id"],
-                    row.get("title"),
-                    int(bool(row.get("adult"))),
-                    row.get("popularity"),
-                    ts,
-                ),
+                [
+                    (
+                        media_type,
+                        row["id"],
+                        row.get("title"),
+                        int(bool(row.get("adult"))),
+                        row.get("popularity"),
+                        ts,
+                    )
+                    for row in batch
+                ],
             )
-            count += 1
+        count += len(batch)
     return count
 
 
-def requeue(conn: sqlite3.Connection, media_type: str, ids: Iterable[int]) -> int:
+def requeue(conn: Connection, media_type: str, ids: Iterable[int]) -> int:
     """Mark titles as pending (inserting unknown ones) so they get re-processed."""
     ts = now_iso()
     count = 0
-    with transaction(conn):
-        for tmdb_id in ids:
-            conn.execute(
+    for batch in _batches(ids):
+        with transaction(conn):
+            conn.executemany(
                 """
                 INSERT INTO titles (media_type, tmdb_id, status, updated_at)
                 VALUES (?, ?, 'pending', ?)
-                ON CONFLICT (media_type, tmdb_id) DO UPDATE SET status = 'pending'
+                ON CONFLICT (media_type, tmdb_id) DO UPDATE SET status = 'pending', attempts = 0
                 """,
-                (media_type, int(tmdb_id), ts),
+                [(media_type, int(tmdb_id), ts) for tmdb_id in batch],
             )
-            count += 1
+        count += len(batch)
     return count
 
 
 def pending(
-    conn: sqlite3.Connection,
+    conn: Connection,
     media_type: str | None,
     include_adult: bool,
     retry_errors: bool,
@@ -152,7 +261,7 @@ def pending(
     return [(r[0], r[1]) for r in conn.execute(sql, params)]
 
 
-def find_by_poster(conn: sqlite3.Connection, poster_path: str) -> sqlite3.Row | None:
+def find_by_poster(conn: Connection, poster_path: str) -> Row | None:
     """Reuse colours when another title already has the exact same poster file."""
     return conn.execute(
         "SELECT * FROM titles WHERE poster_path = ? AND status = 'done' LIMIT 1",
@@ -161,7 +270,7 @@ def find_by_poster(conn: sqlite3.Connection, poster_path: str) -> sqlite3.Row | 
 
 
 def save_result(
-    conn: sqlite3.Connection,
+    conn: Connection,
     media_type: str,
     tmdb_id: int,
     *,
@@ -194,7 +303,7 @@ def save_result(
                 tertiary_hex = ?, tertiary_ratio = ?,
                 status = ?,
                 error = ?,
-                attempts = CASE WHEN ? = 'error' THEN attempts + 1 ELSE 0 END,
+                attempts = CASE WHEN ? = 1 THEN attempts + 1 ELSE 0 END,
                 updated_at = ?
             WHERE media_type = ? AND tmdb_id = ?
             """,
@@ -205,7 +314,7 @@ def save_result(
                 *colours,
                 status,
                 error,
-                status,
+                int(status == ERROR),
                 now_iso(),
                 media_type,
                 tmdb_id,
@@ -214,27 +323,28 @@ def save_result(
 
 
 def search(
-    conn: sqlite3.Connection,
+    conn: Connection,
     query: str = "",
     media_type: str | None = None,
     status: str | None = None,
     limit: int = 24,
     offset: int = 0,
-) -> list[sqlite3.Row]:
+) -> list[Row]:
     """Titles matching `query` (title substring or TMDB ID), most popular first."""
     where, params = [], []
     order = "popularity IS NULL, popularity DESC, tmdb_id"
     query = query.strip()
+    like = "ILIKE" if conn.dialect == "postgres" else "LIKE"  # case-insensitive in both
     if query:
         pattern = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        clause = "title LIKE ? ESCAPE '\\'"
+        clause = f"title {like} ? ESCAPE '\\'"
         params.append(f"%{pattern}%")
         if query.isdigit():
             clause = f"({clause} OR tmdb_id = ?)"
             params.append(int(query))
         where.append(clause)
         # Exact matches first, then titles starting with the query, then the rest.
-        order = "(title = ? COLLATE NOCASE) DESC, (title LIKE ? ESCAPE '\\') DESC, " + order
+        order = f"(lower(title) = lower(?)) DESC, (title {like} ? ESCAPE '\\') DESC, " + order
     if media_type:
         where.append("media_type = ?")
         params.append(media_type)
@@ -251,12 +361,12 @@ def search(
     return conn.execute(sql, params).fetchall()
 
 
-def get_state(conn: sqlite3.Connection, key: str) -> str | None:
+def get_state(conn: Connection, key: str) -> str | None:
     row = conn.execute("SELECT value FROM sync_state WHERE key = ?", (key,)).fetchone()
     return row[0] if row else None
 
 
-def set_state(conn: sqlite3.Connection, key: str, value: str) -> None:
+def set_state(conn: Connection, key: str, value: str) -> None:
     with transaction(conn):
         conn.execute(
             "INSERT INTO sync_state (key, value) VALUES (?, ?) "
@@ -265,7 +375,7 @@ def set_state(conn: sqlite3.Connection, key: str, value: str) -> None:
         )
 
 
-def stats(conn: sqlite3.Connection) -> dict:
+def stats(conn: Connection) -> dict:
     out: dict = {m: {} for m in MEDIA_TYPES}
     for row in conn.execute(
         "SELECT media_type, status, COUNT(*) FROM titles GROUP BY media_type, status"

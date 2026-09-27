@@ -16,7 +16,7 @@ def _media_types(value: str) -> list[str]:
 
 
 async def _run(args: argparse.Namespace, settings: Settings) -> dict:
-    conn = db.connect(settings.db_path)
+    conn = db.connect(settings.db_target)
     try:
         async with TMDBClient(
             settings.tmdb_api_key, settings.tmdb_read_token, settings.requests_per_second
@@ -28,12 +28,14 @@ async def _run(args: argparse.Namespace, settings: Settings) -> dict:
                 return await ingest.sync_changes(conn, client, media_types)
             if args.command == "process":
                 media = None if args.media == "all" else args.media
-                return await ingest.process(conn, client, settings, media, args.limit)
+                return await ingest.process(conn, client, settings, media, args.limit, args.max_minutes)
             if args.command == "run":  # full refresh: seed + changes + process
                 result = {"seed": await ingest.seed(conn, client, media_types)}
                 result["sync"] = await ingest.sync_changes(conn, client, media_types)
                 media = None if args.media == "all" else args.media
-                result["process"] = await ingest.process(conn, client, settings, media, args.limit)
+                result["process"] = await ingest.process(
+                    conn, client, settings, media, args.limit, args.max_minutes
+                )
                 return result
     finally:
         conn.close()
@@ -53,6 +55,10 @@ def main(argv: list[str] | None = None) -> None:
         p.add_argument("--media", choices=["movie", "tv", "all"], default="all")
         if name in ("process", "run"):
             p.add_argument("--limit", type=int, default=None, help="Max titles to process")
+            p.add_argument(
+                "--max-minutes", type=float, default=None,
+                help="Stop cleanly after this long (e.g. to fit a CI job limit); resumes next run",
+            )
     sub.add_parser("stats", help="Show counts by status")
     serve = sub.add_parser("serve", help="Run the HTTP API")
     serve.add_argument("--host", default="0.0.0.0")
@@ -63,7 +69,7 @@ def main(argv: list[str] | None = None) -> None:
     settings = Settings.from_env()
 
     if args.command == "stats":
-        conn = db.connect(settings.db_path)
+        conn = db.connect(settings.db_target)
         print(json.dumps(db.stats(conn), indent=2))
         return
     if args.command == "serve":

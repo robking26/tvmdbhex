@@ -1,7 +1,8 @@
 """Read-only HTTP API over the colour database. Never calls TMDB."""
 from __future__ import annotations
 
-import sqlite3
+import logging
+import threading
 from collections.abc import Iterator
 from importlib import resources
 from typing import Literal
@@ -52,7 +53,7 @@ class LookupResponse(BaseModel):
     missing: list[LookupItem]
 
 
-def _row_to_model(row: sqlite3.Row) -> TitleColors:
+def _row_to_model(row: db.Row) -> TitleColors:
     colors = None
     if row["status"] == db.DONE and row["primary_hex"]:
         colors = Colors(
@@ -73,7 +74,10 @@ def _row_to_model(row: sqlite3.Row) -> TitleColors:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
-    db.connect(settings.db_path).close()  # create the file/schema if missing
+    target = settings.db_target
+    postgres = db.is_postgres_url(target)
+    if not postgres:
+        db.connect(target).close()  # create the file/schema if missing
 
     app = FastAPI(
         title="tvmdbhex",
@@ -81,8 +85,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         description="Primary, secondary and tertiary poster colours (hex) for TMDB movies and TV series.",
     )
 
-    def get_conn() -> Iterator[sqlite3.Connection]:
-        conn = db.connect(settings.db_path, readonly=True)
+    # Postgres: one connection per instance, reused across (serverless) requests.
+    shared: dict = {}
+    lock = threading.Lock()
+
+    def postgres_conn() -> db.Connection:
+        with lock:
+            conn = shared.get("conn")
+            if conn is None or conn.closed:
+                conn = db.connect(target, readonly=True)
+                try:
+                    db.ensure_schema(conn)  # first deploy, before the ingester has run
+                except Exception as exc:  # e.g. a concurrent cold start created it
+                    logging.getLogger("tvmdbhex.api").info("schema check skipped: %s", exc)
+                shared["conn"] = conn
+            return conn
+
+    def get_conn() -> Iterator[db.Connection]:
+        if postgres:
+            yield postgres_conn()
+            return
+        conn = db.connect(target, readonly=True)
         try:
             yield conn
         finally:
@@ -104,7 +127,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"status": "ok"}
 
     @app.get("/v1/stats", dependencies=[Depends(require_key)])
-    def stats(conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    def stats(conn: db.Connection = Depends(get_conn)) -> dict:
         return db.stats(conn)
 
     @app.get(
@@ -119,7 +142,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         status: str | None = Query(None, description="e.g. `done` to only return titles with colours"),
         limit: int = Query(24, ge=1, le=100),
         offset: int = Query(0, ge=0, le=10_000),
-        conn: sqlite3.Connection = Depends(get_conn),
+        conn: db.Connection = Depends(get_conn),
     ) -> list[TitleColors]:
         rows = db.search(conn, q, media_type, status, limit, offset)
         return [_row_to_model(r) for r in rows]
@@ -132,7 +155,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def get_title(
         media_type: MediaType,
         tmdb_id: int = Path(ge=1),
-        conn: sqlite3.Connection = Depends(get_conn),
+        conn: db.Connection = Depends(get_conn),
     ) -> TitleColors:
         row = conn.execute(
             f"SELECT {db.TITLE_COLUMNS} FROM titles WHERE media_type = ? AND tmdb_id = ?",
@@ -143,7 +166,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return _row_to_model(row)
 
     @app.post("/v1/lookup", response_model=LookupResponse, dependencies=[Depends(require_key)])
-    def lookup(req: LookupRequest, conn: sqlite3.Connection = Depends(get_conn)) -> LookupResponse:
+    def lookup(req: LookupRequest, conn: db.Connection = Depends(get_conn)) -> LookupResponse:
         found: dict[tuple[str, int], TitleColors] = {}
         for media_type in db.MEDIA_TYPES:
             ids = sorted({i.tmdb_id for i in req.items if i.media_type == media_type})
@@ -179,7 +202,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         after_id: int = Query(0, ge=0, description="Return titles with tmdb_id greater than this"),
         updated_since: str | None = Query(None, description="ISO-8601 timestamp filter"),
         limit: int = Query(100, ge=1, le=1000),
-        conn: sqlite3.Connection = Depends(get_conn),
+        conn: db.Connection = Depends(get_conn),
     ) -> list[TitleColors]:
         sql = (
             f"SELECT {db.TITLE_COLUMNS} FROM titles "

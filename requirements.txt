@@ -1,0 +1,4 @@
+# Runtime dependencies for the Vercel function (website + API only).
+# The ingester's extra dependencies are in pyproject.toml.
+fastapi>=0.110
+psycopg[binary]>=3.1

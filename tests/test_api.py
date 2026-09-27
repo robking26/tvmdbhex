@@ -9,9 +9,9 @@ PALETTE = [("#14207A", 0.6), ("#E62828", 0.25), ("#F0DC3C", 0.15)]
 
 
 @pytest.fixture
-def client(tmp_path):
-    settings = Settings(db_path=str(tmp_path / "api.db"), api_keys=frozenset({"secret"}))
-    conn = db.connect(settings.db_path)
+def client(db_settings):
+    settings = Settings(**db_settings, api_keys=frozenset({"secret"}))
+    conn = db.connect(settings.db_target)
     db.save_result(conn, "movie", 550, status="done", title="Fight Club", poster_path="/fc.jpg", palette=PALETTE)
     db.save_result(conn, "movie", 551, status="no_poster", title="No Poster")
     db.save_result(conn, "tv", 1399, status="done", title="GoT", poster_path="/got.jpg", palette=PALETTE)
@@ -56,9 +56,9 @@ def test_list_and_stats(client):
     assert client.get("/v1/stats").json()["movie"] == {"done": 1, "no_poster": 1}
 
 
-def test_search(tmp_path):
-    settings = Settings(db_path=str(tmp_path / "s.db"))
-    conn = db.connect(settings.db_path)
+def test_search(db_settings):
+    settings = Settings(**db_settings)
+    conn = db.connect(settings.db_target)
     db.upsert_seed(conn, "movie", [
         {"id": 1, "title": "The Matrix", "popularity": 50},
         {"id": 2, "title": "Matrix", "popularity": 5},

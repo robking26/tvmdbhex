@@ -1,0 +1,51 @@
+# Keeps the hosted (Postgres) database filled: new titles, changed posters and retries.
+# Vercel functions can't run for hours, so ingestion runs here instead.
+#
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   DATABASE_URL     - the same Postgres URL the Vercel project uses
+#   TMDB_READ_TOKEN  - TMDB "API Read Access Token" (or set TMDB_API_KEY instead)
+name: Ingest posters
+
+on:
+  schedule:
+    - cron: "17 */6 * * *" # every 6 hours; exits in minutes once the backfill is done
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Max titles to process (blank = all pending)"
+        required: false
+
+concurrency:
+  group: ingest
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install .
+      - name: Check secrets
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TMDB_READ_TOKEN: ${{ secrets.TMDB_READ_TOKEN }}
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+        run: |
+          if [ -z "$DATABASE_URL" ]; then echo "::error::Add the DATABASE_URL repository secret"; exit 1; fi
+          if [ -z "$TMDB_READ_TOKEN$TMDB_API_KEY" ]; then echo "::error::Add the TMDB_READ_TOKEN (or TMDB_API_KEY) repository secret"; exit 1; fi
+      - name: Seed, sync and process
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TMDB_READ_TOKEN: ${{ secrets.TMDB_READ_TOKEN }}
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+        # Stops cleanly before the 6h job limit; the next run carries on.
+        run: tvmdbhex run --max-minutes 320 ${{ inputs.limit && format('--limit {0}', inputs.limit) || '' }}
+      - run: tvmdbhex stats
+        if: always()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
