@@ -7,8 +7,10 @@
 name: Ingest posters
 
 on:
-  schedule:
-    - cron: "17 */6 * * *" # every 6 hours; exits in minutes once the backfill is done
+  # Paused: runs only when started manually (Actions -> Ingest posters -> Run workflow).
+  # To resume automatic runs every 6 hours, restore:
+  #   schedule:
+  #     - cron: "17 */6 * * *"
   workflow_dispatch:
     inputs:
       limit:
