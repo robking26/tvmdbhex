@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import json
 import logging
 
@@ -56,6 +57,10 @@ def main(argv: list[str] | None = None) -> None:
         if name in ("process", "run"):
             p.add_argument("--limit", type=int, default=None, help="Max titles to process")
             p.add_argument(
+                "--top", type=int, default=None,
+                help="Only process the N most popular titles overall (default: TVMDBHEX_MAX_TITLES)",
+            )
+            p.add_argument(
                 "--max-minutes", type=float, default=None,
                 help="Stop cleanly after this long (e.g. to fit a CI job limit); resumes next run",
             )
@@ -68,6 +73,8 @@ def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)  # one line per request is too noisy
     settings = Settings.from_env()
+    if getattr(args, "top", None):
+        settings = dataclasses.replace(settings, max_titles=args.top)
 
     if args.command == "stats":
         conn = db.connect(settings.db_target)

@@ -12,8 +12,12 @@ on:
   workflow_dispatch:
     inputs:
       limit:
-        description: "Max titles to process (blank = all pending)"
+        description: "Max titles to process in this run (blank = no batch limit)"
         required: false
+      top:
+        description: "Only ever process the N most popular titles"
+        required: false
+        default: "500000"
 
 concurrency:
   group: ingest
@@ -43,6 +47,8 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           TMDB_READ_TOKEN: ${{ secrets.TMDB_READ_TOKEN }}
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          # Catalogue cap: scheduled runs have no inputs, so they use 500000 too.
+          TVMDBHEX_MAX_TITLES: ${{ inputs.top || '500000' }}
         # Stops cleanly before the 6h job limit; the next run carries on.
         run: tvmdbhex run --max-minutes 320 ${{ inputs.limit && format('--limit {0}', inputs.limit) || '' }}
       - run: tvmdbhex stats

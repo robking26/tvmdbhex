@@ -101,7 +101,9 @@ async def process(
     retry_errors: bool = True,
 ) -> dict:
     """Extract colours for every pending title (most popular first)."""
-    todo = db.pending(conn, media_type, settings.include_adult, retry_errors, MAX_ATTEMPTS, limit)
+    todo = db.pending(
+        conn, media_type, settings.include_adult, retry_errors, MAX_ATTEMPTS, limit, settings.max_titles
+    )
     log.info("processing %d titles with %d workers", len(todo), settings.concurrency)
     queue: asyncio.Queue[tuple[str, int]] = asyncio.Queue()
     for item in todo:

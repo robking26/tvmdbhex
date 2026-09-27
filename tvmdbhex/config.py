@@ -21,6 +21,7 @@ class Settings:
     requests_per_second: float = 40.0
     poster_size: str = "w185"
     include_adult: bool = False
+    max_titles: int | None = None  # only ever process the N most popular titles
 
     @property
     def db_target(self) -> str:
@@ -43,4 +44,5 @@ class Settings:
             ),
             poster_size=os.environ.get("TVMDBHEX_POSTER_SIZE", cls.poster_size),
             include_adult=_bool(os.environ.get("TVMDBHEX_INCLUDE_ADULT"), cls.include_adult),
+            max_titles=int(os.environ["TVMDBHEX_MAX_TITLES"]) if os.environ.get("TVMDBHEX_MAX_TITLES") else None,
         )

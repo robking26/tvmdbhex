@@ -162,3 +162,13 @@ def test_pending_alternates_movie_and_tv(settings):
     ]
     assert db.pending(conn, None, False, True, 5, 2) == [("movie", 1), ("tv", 101)]
     assert db.pending(conn, "tv", False, True, 5, None) == [("tv", 101), ("tv", 102)]
+
+
+def test_pending_top_caps_by_rank_not_batch(settings):
+    conn = db.connect(settings.db_target)
+    db.upsert_seed(conn, "movie", [{"id": i, "popularity": 10 - i} for i in range(1, 4)])
+    db.upsert_seed(conn, "tv", [{"id": 100 + i, "popularity": 1000 - i} for i in range(1, 3)])
+    db.save_result(conn, "movie", 1, status="done", palette=[("#000000", 1.0)] * 3)
+    # Ranking: movie 1 (done), tv 101, movie 2, tv 102, movie 3. Top 3 leaves 2 to do.
+    assert db.pending(conn, None, False, True, 5, None, top=3) == [("tv", 101), ("movie", 2)]
+    assert db.pending(conn, None, False, True, 5, 1, top=3) == [("tv", 101)]

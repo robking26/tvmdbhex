@@ -70,6 +70,7 @@ runs `tvmdbhex run` once a day, both sharing the same database volume.
 | `TVMDBHEX_REQUESTS_PER_SECOND` | `40` | TMDB API rate cap (TMDB allows ~50/s) |
 | `TVMDBHEX_POSTER_SIZE` | `w185` | Poster size downloaded for analysis |
 | `TVMDBHEX_INCLUDE_ADULT` | `false` | Also process titles flagged adult |
+| `TVMDBHEX_MAX_TITLES` | *(no cap)* | Only ever process the N most popular titles (the Vercel ingest workflow uses 500000). Titles below the cap stay `pending` |
 
 **First run:** TMDB lists roughly 1M+ movies and 200k+ series. At 40 req/s
 that takes about 8–9 hours. Popular titles are processed first, so the useful

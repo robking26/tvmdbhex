@@ -247,27 +247,34 @@ def pending(
     retry_errors: bool,
     max_attempts: int,
     limit: int | None,
+    top: int | None = None,
 ) -> list[tuple[str, int]]:
-    statuses = [PENDING] + ([ERROR] if retry_errors else [])
-    sql = f"SELECT media_type, tmdb_id FROM titles WHERE status IN ({','.join('?' * len(statuses))})"
-    params: list = list(statuses)
-    sql += " AND attempts < ?"
-    params.append(max_attempts)
+    """Titles still to process, most popular first.
+
+    `top` caps the catalogue to the N most popular titles overall (whatever their
+    status): titles ranked below it are never returned. `limit` caps this batch.
+    """
+    statuses = {PENDING} | ({ERROR} if retry_errors else set())
+    sql = "SELECT media_type, tmdb_id, status, attempts FROM titles WHERE 1 = 1"
+    params: list = []
     if media_type:
         sql += " AND media_type = ?"
         params.append(media_type)
     if not include_adult:
         sql += " AND adult = 0"
     sql += " ORDER BY popularity IS NULL, popularity DESC, tmdb_id"
-    by_type: dict[str, list[tuple[str, int]]] = {m: [] for m in MEDIA_TYPES}
+    by_type: dict[str, list] = {m: [] for m in MEDIA_TYPES}
     for r in conn.execute(sql, params):
-        by_type[r[0]].append((r[0], r[1]))
+        by_type[r[0]].append((r[0], r[1], r[2], r[3]))
     # Movie and TV popularity scores aren't on the same scale, so rank each type
     # separately and alternate: the Nth most popular movie next to the Nth TV series.
-    out: list[tuple[str, int]] = []
+    ranked: list = []
     movies, shows = by_type["movie"], by_type["tv"]
     for i in range(max(len(movies), len(shows))):
-        out.extend(x[i] for x in (movies, shows) if i < len(x))
+        ranked.extend(x[i] for x in (movies, shows) if i < len(x))
+    if top:
+        ranked = ranked[:top]
+    out = [(m, i) for m, i, status, attempts in ranked if status in statuses and attempts < max_attempts]
     return out[:limit] if limit else out
 
 
