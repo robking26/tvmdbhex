@@ -16,7 +16,15 @@ def _media_types(value: str) -> list[str]:
     return list(db.MEDIA_TYPES) if value == "all" else [value]
 
 
+def _describe_db(settings: Settings) -> str:
+    if settings.database_url:
+        host = settings.database_url.split("@", 1)[-1].split("/", 1)[0]  # no credentials
+        return f"postgres at {host}"
+    return f"sqlite at {settings.db_path}"
+
+
 async def _run(args: argparse.Namespace, settings: Settings) -> dict:
+    logging.getLogger("tvmdbhex").info("database: %s", _describe_db(settings))
     conn = db.connect(settings.db_target)
     try:
         async with TMDBClient(

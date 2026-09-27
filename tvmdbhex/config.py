@@ -1,7 +1,35 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
+
+_PG_URL = re.compile(r"postgres(?:ql)?://\S+")
+
+
+def parse_database_url(raw: str | None) -> str:
+    """Normalise a DATABASE_URL value; '' if unset.
+
+    Tolerates values pasted from a dashboard: surrounding whitespace/quotes, a
+    `DATABASE_URL=` prefix, or a whole .env snippet (the DATABASE_URL line wins).
+    Anything else raises, rather than silently falling back to a local SQLite file.
+    """
+    value = (raw or "").strip()
+    if not value:
+        return ""
+    candidates = [value]
+    for line in value.splitlines():
+        key, sep, rest = line.strip().partition("=")
+        if sep and key.strip() in ("DATABASE_URL", "POSTGRES_URL"):
+            candidates.insert(0, rest)
+    for candidate in candidates:
+        match = _PG_URL.search(candidate.strip().strip("'\""))
+        if match:
+            return match.group(0).rstrip("'\"")
+    raise ValueError(
+        "DATABASE_URL is set but doesn't contain a postgres:// or postgresql:// URL. "
+        "Set it to just the connection string, e.g. postgresql://user:pass@host/db?sslmode=require"
+    )
 
 
 def _bool(value: str | None, default: bool = False) -> bool:
@@ -34,7 +62,9 @@ class Settings:
         return cls(
             db_path=os.environ.get("TVMDBHEX_DB_PATH", cls.db_path),
             # Vercel's Neon/Postgres integrations set DATABASE_URL / POSTGRES_URL.
-            database_url=os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL") or "",
+            database_url=parse_database_url(
+                os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL")
+            ),
             tmdb_api_key=os.environ.get("TMDB_API_KEY", ""),
             tmdb_read_token=os.environ.get("TMDB_READ_TOKEN", ""),
             api_keys=frozenset(k.strip() for k in keys.split(",") if k.strip()),
