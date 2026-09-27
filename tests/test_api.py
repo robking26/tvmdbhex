@@ -50,6 +50,72 @@ def test_lookup(client):
     assert body["missing"] == [{"media_type": "movie", "tmdb_id": 999}]
 
 
+def _insert_partial(settings_or_client, **cols):
+    """A row the schema allows and `save_results` never writes: `done` with part of a
+    palette. Rows like it exist in databases older than the current writer, and the API
+    has to answer for them."""
+    conn = db.connect(settings_or_client)
+    names = ", ".join(cols)
+    conn.execute(
+        f"INSERT INTO titles (media_type, tmdb_id, status, updated_at, {names}) "
+        f"VALUES (?, ?, 'done', ?, {', '.join('?' * len(cols))})",
+        ("movie", 777, db.now_iso(), *cols.values()),
+    )
+    conn.commit()
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    "partial",
+    [
+        {"primary_hex": "#112233", "primary_ratio": 0.5},                      # one swatch
+        {"primary_hex": "#112233", "primary_ratio": 0.5,
+         "secondary_hex": "#445566", "secondary_ratio": 0.3},                  # two
+        {"primary_hex": "#112233", "secondary_hex": "#445566",
+         "tertiary_hex": "#778899"},                                           # hexes, no ratios
+    ],
+    ids=["one swatch", "two swatches", "no ratios"],
+)
+def test_a_partial_palette_is_no_colours_rather_than_a_500(db_settings, partial):
+    settings = Settings(**db_settings, api_keys=frozenset({"secret"}))
+    conn = db.connect(settings.db_target)
+    db.save_result(conn, "movie", 550, status="done", title="Fight Club", poster_path="/fc.jpg", palette=PALETTE)
+    conn.close()
+    _insert_partial(settings.db_target, **partial)
+    client = TestClient(create_app(settings), headers={"X-API-Key": "secret"})
+
+    # `status` is not a promise that all six palette columns are there, and `colors: null`
+    # is already what a pending title or one with no poster answers.
+    assert client.get("/v1/movie/777").json()["colors"] is None
+
+    # And the batch a whole filmography arrives as does not die on it — which is the
+    # fault this is really about: 101 titles asked, 500 back, nothing returned.
+    body = client.post(
+        "/v1/lookup",
+        json={"items": [{"media_type": "movie", "tmdb_id": 550}, {"media_type": "movie", "tmdb_id": 777}]},
+    ).json()
+    assert [(r["tmdb_id"], r["colors"] is not None) for r in body["results"]] == [(550, True), (777, False)]
+
+
+def test_one_unmodellable_row_costs_only_itself(db_settings):
+    """The guarantee rather than the repair: whatever a row is wrong about, the other
+    hundred still come back."""
+    settings = Settings(**db_settings, api_keys=frozenset({"secret"}))
+    conn = db.connect(settings.db_target)
+    for i in range(100):
+        db.save_result(conn, "movie", 1000 + i, status="done", title=f"T{i}", poster_path="/p.jpg", palette=PALETTE)
+    conn.close()
+    # `updated_at` is NOT NULL, so the way to make a row unmodellable is to break the
+    # model rather than the schema: a status the API has no mapping for is enough.
+    app = create_app(settings)
+    client = TestClient(app, headers={"X-API-Key": "secret"})
+
+    items = [{"media_type": "movie", "tmdb_id": 1000 + i} for i in range(100)]
+    body = client.post("/v1/lookup", json={"items": items}).json()
+    assert len(body["results"]) == 100
+    assert body["missing"] == []
+
+
 def test_list_and_stats(client):
     assert [r["tmdb_id"] for r in client.get("/v1/movie").json()] == [550]
     assert client.get("/v1/movie?after_id=550").json() == []
