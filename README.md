@@ -28,22 +28,63 @@ is on Vercel.
 `tvmdbhex run` does all three steps. Run it daily. It is resumable: stop it at
 any time and the next run carries on from where it stopped.
 
-### Colour extraction
+### Colour selection
 
-The poster is downscaled to 64×96, converted to CIELAB (perceptual colour
-space) and clustered with k-means (k=8, fixed seed, so results are
-reproducible). Clusters are ranked by the share of pixels they cover:
+Each poster gets three colours with distinct jobs, chosen roughly the way a
+designer would, not simply the three biggest areas:
 
-- **primary**: the largest cluster
-- **secondary / tertiary**: the next largest clusters that are *visibly
-  different* (ΔE ≥ 15) from the colours already picked. Near-identical shades
-  of the same black don't take up all three slots.
-- Clusters covering less than 2% of the poster are ignored.
-- If a poster has fewer than three distinct colours, the slots fall back to
-  the next-largest cluster, then repeat the last colour.
+- **primary**: the identity colour. It should be vivid, distinctive, in
+  contrast with its surroundings, and actually present in the poster.
+  Barbie → pink, even though the blue sky covers more of the poster.
+- **secondary**: the strongest supporting or environmental colour, driven
+  mostly by coverage (Barbie → the blue).
+- **tertiary**: an accent that stands apart from both (It → the yellow
+  raincoat next to black and the red balloon).
 
-Each colour also carries a `ratio` (share of pixels, 0–1). This lets clients
-tell a colour that dominates the poster from one that only just made the cut.
+How it works (`tvmdbhex/colors.py`):
+
+1. **Candidates.** The poster is downscaled to 60×90 and converted to OKLab,
+   a perceptual colour space. Deterministic k-means finds ~12 clusters. Then:
+   - Near-duplicates merge, so a gradient sky is one colour, and all
+     near-blacks count as one black.
+   - An *accent pass* rescues small vivid details that k-means averaged away,
+     such as a yellow dress on a purple poster.
+2. **Features per candidate.** Coverage (with mild centre weighting), OKLCH
+   chroma, saturation and lightness; distinctiveness from the rest of the
+   poster; local contrast against neighbouring regions; and neutrality (grey,
+   near-black, near-white, beige/brown).
+3. **Poster colourfulness** (average chroma) decides how much vividness counts
+   at all. On a black-and-white or muted poster, vividness weight shifts to
+   presence and neutral penalties fade out. So The Witch stays black, Roma
+   stays black-and-white with its yellow title as the accent, and a
+   predominantly black poster (Kingsman) keeps black as its identity.
+4. **Role scores** pick primary, then secondary, then tertiary. Each pick must
+   be at least 0.12 apart in OKLab distance, and loses points for repeating
+   an earlier pick's hue family (so yellow is not paired with mustard). The
+   distance threshold only relaxes when the poster has nothing better.
+
+Every weight, threshold and penalty is in one `PaletteConfig` object, with
+comments explaining each value. The output is deterministic and takes about
+30 ms per poster. `PALETTE_VERSION` is stored with each title, and the
+ingester re-colours titles made by an older version.
+
+#### Tuning tools
+
+- **Debug view:** set `TVMDBHEX_DEBUG=1` and open `/debug`. Drop in poster
+  images, paste TMDB poster paths, or load the top N titles. Each poster
+  shows every candidate with its features and role scores, the new picks next
+  to the legacy ones, and automatic review flags: palettes that are too
+  similar, a neutral beating a distinctive accent, a vivid speck chosen as
+  primary, and a lightness drift from the poster.
+- **Offline report:** run `python tools/palette_report.py <folder> report.html`
+  on any folder of posters.
+- **Test set:** `tools/palette_testset.json` lists 44 posters across the
+  categories that matter (bright, horror, monochrome, skies, skin tones,
+  black backgrounds, single strong accents). The *Palette fixtures* workflow
+  downloads them to the `palette-fixtures` branch.
+
+The legacy algorithm (area ranking) stays in `tvmdbhex/colors_legacy.py`,
+for comparison only.
 
 ## Setup
 
@@ -70,6 +111,7 @@ runs `tvmdbhex run` once a day, both sharing the same database volume.
 | `TVMDBHEX_REQUESTS_PER_SECOND` | `40` | TMDB API rate cap (TMDB allows ~50/s) |
 | `TVMDBHEX_POSTER_SIZE` | `w185` | Poster size downloaded for analysis |
 | `TVMDBHEX_INCLUDE_ADULT` | `false` | Also process titles flagged adult |
+| `TVMDBHEX_DEBUG` | `false` | Enables `/debug` and `/v1/debug/*` palette tuning tools |
 | `TVMDBHEX_MAX_TITLES` | *(no cap)* | Only ever process the N most popular titles (the Vercel ingest workflow uses 500000). Titles below the cap stay `pending` |
 
 **First run:** TMDB lists roughly 1M+ movies and 200k+ series. At 40 req/s

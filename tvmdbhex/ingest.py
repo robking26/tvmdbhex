@@ -7,7 +7,7 @@ import time
 from datetime import date, timedelta
 
 from . import db
-from .colors import extract_palette_from_bytes
+from .colors import PALETTE_VERSION, extract_palette_from_bytes
 from .config import Settings
 from .tmdb import NotFound, TMDBClient, parse_export
 
@@ -80,6 +80,7 @@ async def process_one(
         "adult": adult,
         "poster_path": poster_path,
         "palette": palette,
+        "palette_version": PALETTE_VERSION,
     }
 
 
@@ -122,9 +123,10 @@ async def process(
 ) -> dict:
     """Extract colours for every pending title (most popular first)."""
     todo = db.pending(
-        conn, media_type, settings.include_adult, retry_errors, MAX_ATTEMPTS, limit, settings.max_titles
+        conn, media_type, settings.include_adult, retry_errors, MAX_ATTEMPTS, limit, settings.max_titles,
+        palette_version=PALETTE_VERSION,
     )
-    posters = db.poster_palettes(conn)
+    posters = db.poster_palettes(conn, PALETTE_VERSION)
     log.info(
         "processing %d titles with %d workers (%d known posters)", len(todo), settings.concurrency, len(posters)
     )

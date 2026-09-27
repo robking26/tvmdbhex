@@ -172,3 +172,25 @@ def test_pending_top_caps_by_rank_not_batch(settings):
     # Ranking: movie 1 (done), tv 101, movie 2, tv 102, movie 3. Top 3 leaves 2 to do.
     assert db.pending(conn, None, False, True, 5, None, top=3) == [("tv", 101), ("movie", 2)]
     assert db.pending(conn, None, False, True, 5, 1, top=3) == [("tv", 101)]
+
+
+def test_older_palettes_are_recoloured(settings):
+    conn = db.connect(settings.db_target)
+    db.upsert_seed(conn, "movie", [{"id": 1, "popularity": 9}, {"id": 2, "popularity": 8}])
+    pal = [("#000000", 1.0)] * 3
+    db.save_result(conn, "movie", 1, status="done", poster_path="/a.jpg", palette=pal)  # legacy: no version
+    db.save_result(conn, "movie", 2, status="done", poster_path="/b.jpg", palette=pal, palette_version=2)
+    assert db.pending(conn, None, False, True, 5, None) == []
+    assert db.pending(conn, None, False, True, 5, None, palette_version=2) == [("movie", 1)]
+    assert set(db.poster_palettes(conn, 2)) == {"/b.jpg"}
+
+
+def test_migration_adds_palette_version(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.executescript(db.SCHEMA.replace("    palette_version INTEGER,\n", ""))
+    old.close()
+    conn = db.connect(str(path))
+    assert "palette_version" in {r[1] for r in conn.execute("PRAGMA table_info(titles)")}

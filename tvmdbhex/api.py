@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from importlib import resources
 from typing import Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
@@ -236,4 +236,49 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         params.append(limit)
         return [_row_to_model(r) for r in conn.execute(sql, params)]
 
+    if settings.debug:
+        _add_debug_routes(app, require_key)
     return app
+
+
+MAX_DEBUG_IMAGE_BYTES = 10 * 1024 * 1024
+
+
+def _add_debug_routes(app: FastAPI, require_key) -> None:
+    """Palette tuning tools, only mounted when TVMDBHEX_DEBUG is on.
+
+    Image libraries are imported lazily so the production API stays lean.
+    """
+    debug_html = resources.files("tvmdbhex").joinpath("static/debug.html").read_text("utf-8")
+
+    @app.get("/debug", response_class=HTMLResponse, include_in_schema=False)
+    def debug_page() -> str:
+        return debug_html
+
+    @app.post("/v1/debug/palette", dependencies=[Depends(require_key)], tags=["debug"])
+    async def debug_palette_upload(request: Request) -> dict:
+        """Analyse an uploaded poster (raw image bytes as the request body):
+        candidates, features, role scores, legacy vs current palette, flags."""
+        from .palette_debug import compare_bytes
+
+        data = await request.body()
+        if not data or len(data) > MAX_DEBUG_IMAGE_BYTES:
+            raise HTTPException(status_code=400, detail="Send an image (max 10 MB) as the request body")
+        try:
+            return compare_bytes(data)
+        except Exception as exc:  # unreadable image
+            raise HTTPException(status_code=400, detail=f"Could not analyse image: {exc}") from exc
+
+    @app.get("/v1/debug/palette", dependencies=[Depends(require_key)], tags=["debug"])
+    def debug_palette_tmdb(poster_path: str = Query(pattern=r"^/[A-Za-z0-9_.-]+\.(jpg|jpeg|png|webp)$")) -> dict:
+        """Analyse a TMDB poster by its poster_path (fetched from TMDB's image CDN)."""
+        import httpx
+
+        from .palette_debug import compare_bytes
+
+        try:
+            resp = httpx.get(f"https://image.tmdb.org/t/p/w342{poster_path}", timeout=20, follow_redirects=True)
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f"Could not fetch poster: {exc}") from exc
+        return compare_bytes(resp.content)

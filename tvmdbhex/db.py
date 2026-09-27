@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS titles (
     status          TEXT    NOT NULL DEFAULT 'pending',
     error           TEXT,
     attempts        INTEGER NOT NULL DEFAULT 0,
+    palette_version INTEGER,
     updated_at      TEXT    NOT NULL,
     PRIMARY KEY (media_type, tmdb_id)
 );
@@ -154,6 +155,7 @@ def connect(target: str, readonly: bool = False) -> Connection:
         conn = PostgresConnection(target, autocommit=readonly)
         if not readonly:
             conn.executescript(PG_SCHEMA)
+            _migrate(conn)
         return conn
 
     if target != ":memory:" and not readonly:
@@ -167,6 +169,7 @@ def connect(target: str, readonly: bool = False) -> Connection:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.executescript(SCHEMA)
+        _migrate(conn)
     conn.execute("PRAGMA busy_timeout=10000")
     conn.row_factory = sqlite3.Row
     return conn
@@ -174,6 +177,19 @@ def connect(target: str, readonly: bool = False) -> Connection:
 
 def ensure_schema(conn: Connection) -> None:
     conn.executescript(PG_SCHEMA if conn.dialect == "postgres" else SCHEMA)
+    _migrate(conn)
+
+
+def _migrate(conn: Connection) -> None:
+    """Add columns introduced after a database was created."""
+    if conn.dialect == "postgres":
+        conn.execute("ALTER TABLE titles ADD COLUMN IF NOT EXISTS palette_version INTEGER")
+        conn.commit()
+        return
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(titles)")}
+    if "palette_version" not in columns:
+        conn.execute("ALTER TABLE titles ADD COLUMN palette_version INTEGER")
+        conn.commit()
 
 
 def _batches(items: Iterable, size: int = 5000) -> Iterator[list]:
@@ -249,14 +265,17 @@ def pending(
     max_attempts: int,
     limit: int | None,
     top: int | None = None,
+    palette_version: int | None = None,
 ) -> list[tuple[str, int]]:
     """Titles still to process, most popular first.
 
     `top` caps the catalogue to the N most popular titles overall (whatever their
     status): titles ranked below it are never returned. `limit` caps this batch.
+    With `palette_version`, titles coloured by an older algorithm version are
+    returned too, so they get re-coloured.
     """
     statuses = {PENDING} | ({ERROR} if retry_errors else set())
-    sql = "SELECT media_type, tmdb_id, status, attempts FROM titles WHERE 1 = 1"
+    sql = "SELECT media_type, tmdb_id, status, attempts, palette_version FROM titles WHERE 1 = 1"
     params: list = []
     if media_type:
         sql += " AND media_type = ?"
@@ -266,7 +285,7 @@ def pending(
     sql += " ORDER BY popularity IS NULL, popularity DESC, tmdb_id"
     by_type: dict[str, list] = {m: [] for m in MEDIA_TYPES}
     for r in conn.execute(sql, params):
-        by_type[r[0]].append((r[0], r[1], r[2], r[3]))
+        by_type[r[0]].append((r[0], r[1], r[2], r[3], r[4]))
     # Movie and TV popularity scores aren't on the same scale, so rank each type
     # separately and alternate: the Nth most popular movie next to the Nth TV series.
     ranked: list = []
@@ -275,7 +294,12 @@ def pending(
         ranked.extend(x[i] for x in (movies, shows) if i < len(x))
     if top:
         ranked = ranked[:top]
-    out = [(m, i) for m, i, status, attempts in ranked if status in statuses and attempts < max_attempts]
+    def todo(status: str, attempts: int, version: int | None) -> bool:
+        if status in statuses and attempts < max_attempts:
+            return True
+        return palette_version is not None and status == DONE and (version or 1) < palette_version
+
+    out = [(m, i) for m, i, status, attempts, version in ranked if todo(status, attempts, version)]
     return out[:limit] if limit else out
 
 
@@ -287,7 +311,7 @@ def save_results(conn: Connection, results: list[dict]) -> None:
     """Store processing outcomes in one transaction (two round trips per batch).
 
     Each result: media_type, tmdb_id, status and optionally title, adult,
-    poster_path, palette [(hex, ratio) x3], error.
+    poster_path, palette [(hex, ratio) x3], palette_version, error.
     """
     if not results:
         return
@@ -306,6 +330,7 @@ def save_results(conn: Connection, results: list[dict]) -> None:
                 r["status"],
                 r.get("error"),
                 int(r["status"] == ERROR),
+                r.get("palette_version") if palette else None,
                 ts,
                 r["media_type"],
                 r["tmdb_id"],
@@ -331,6 +356,7 @@ def save_results(conn: Connection, results: list[dict]) -> None:
                 status = ?,
                 error = ?,
                 attempts = CASE WHEN ? = 1 THEN attempts + 1 ELSE 0 END,
+                palette_version = ?,
                 updated_at = ?
             WHERE media_type = ? AND tmdb_id = ?
             """,
@@ -338,11 +364,14 @@ def save_results(conn: Connection, results: list[dict]) -> None:
         )
 
 
-def poster_palettes(conn: Connection) -> dict[str, list[tuple[str, float]]]:
-    """poster_path -> palette for every processed title, to reuse without re-downloading."""
+def poster_palettes(conn: Connection, palette_version: int) -> dict[str, list[tuple[str, float]]]:
+    """poster_path -> palette for every title coloured by this algorithm version,
+    to reuse without re-downloading (poster files are immutable)."""
     rows = conn.execute(
         "SELECT poster_path, primary_hex, primary_ratio, secondary_hex, secondary_ratio, "
-        "tertiary_hex, tertiary_ratio FROM titles WHERE status = 'done' AND poster_path IS NOT NULL"
+        "tertiary_hex, tertiary_ratio FROM titles "
+        "WHERE status = 'done' AND poster_path IS NOT NULL AND palette_version = ?",
+        (palette_version,),
     )
     return {r[0]: [(r[1], r[2]), (r[3], r[4]), (r[5], r[6])] for r in rows}
 

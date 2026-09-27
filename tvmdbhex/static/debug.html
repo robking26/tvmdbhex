@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Palette debugger</title>
+<style>
+  :root {
+    --bg: #f4f4f5; --surface: #ffffff; --surface-2: #ececef; --line: #dcdce0;
+    --text: #18181b; --muted: #62626b; --warn: #b42318; --ok: #067647;
+    --p: #fef3c7; --s: #e0f2fe; --t: #ede9fe;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f0f11; --surface: #18181b; --surface-2: #222226; --line: #2e2e33;
+      --text: #ececef; --muted: #9a9aa3; --warn: #f97066; --ok: #47cd89;
+      --p: #3a2f0b; --s: #0b2a3a; --t: #251a3d;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 ui-sans-serif, system-ui, sans-serif; }
+  .mono, code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  .wrap { max-width: 1280px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 20px; margin: 4px 0; }
+  .sub { color: var(--muted); margin: 0 0 14px; }
+  .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px; display: grid; gap: 10px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  textarea, input[type=number], input[type=password] {
+    background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font: inherit;
+  }
+  textarea { width: 100%; min-height: 64px; font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
+  .btn { background: var(--surface-2); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 7px 12px; font: inherit; cursor: pointer; }
+  .btn:hover { border-color: var(--muted); }
+  .drop { border: 2px dashed var(--line); border-radius: 10px; padding: 14px; text-align: center; color: var(--muted); cursor: pointer; }
+  .drop.over { border-color: var(--text); color: var(--text); }
+  #summary { color: var(--muted); margin: 14px 0 8px; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-bottom: 12px; display: grid; grid-template-columns: 170px 1fr; gap: 14px; }
+  .card > img { width: 170px; aspect-ratio: 2/3; object-fit: cover; border-radius: 6px; background: var(--surface-2); }
+  .card h2 { font-size: 15px; margin: 0 0 6px; word-break: break-all; }
+  .pal { display: flex; gap: 14px; align-items: flex-start; flex-wrap: wrap; margin: 4px 0; }
+  .pal .lbl { width: 34px; font-weight: 600; padding-top: 4px; }
+  .sw { display: flex; gap: 6px; align-items: center; font-size: 12px; }
+  .sw i { display: block; border-radius: 6px; border: 1px solid rgba(128,128,128,.35); }
+  .sw .big { width: 52px; height: 52px; } .sw .small { width: 26px; height: 26px; }
+  .sw small { color: var(--muted); display: block; }
+  .strip { display: flex; height: 16px; border-radius: 4px; overflow: hidden; margin: 8px 0 4px; }
+  .strip span { display: block; }
+  .flags { margin: 6px 0; padding-left: 18px; color: var(--warn); }
+  .flags .ok { color: var(--ok); }
+  .meta { color: var(--muted); font-size: 12px; }
+  .tablewrap { overflow-x: auto; }
+  table { border-collapse: collapse; font-size: 12px; margin-top: 6px; }
+  th, td { padding: 3px 7px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  tr.primary { background: var(--p); } tr.secondary { background: var(--s); } tr.tertiary { background: var(--t); }
+  .chip { display: inline-block; width: 13px; height: 13px; border-radius: 3px; vertical-align: -2px; margin-right: 5px; border: 1px solid rgba(128,128,128,.35); }
+  .err { color: var(--warn); }
+  @media (max-width: 640px) {
+    .card { grid-template-columns: 1fr; }
+    .card > img { width: 140px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Palette debugger</h1>
+  <p class="sub">Compare the current palette algorithm (v<span id="ver">?</span>) with the legacy one. Rows in each table are candidate clusters; highlighted rows are the picks.</p>
+
+  <div class="panel">
+    <div id="drop" class="drop">Drop poster images here, or click to choose files
+      <input id="files" type="file" accept="image/*" multiple hidden>
+    </div>
+    <textarea id="paths" placeholder="TMDB poster paths, one per line, e.g. /iuFNMS8U5cb6xfzi51Dbkovj7vM.jpg"></textarea>
+    <div class="row">
+      <button class="btn" id="runPaths">Analyse poster paths</button>
+      <span class="meta">or</span>
+      <button class="btn" id="loadTop">Load top</button>
+      <input id="topN" type="number" min="1" max="200" value="30" style="width:80px">
+      <span class="meta">titles from the database</span>
+      <label class="meta" style="margin-left:auto"><input type="checkbox" id="onlyFlagged"> only flagged</label>
+    </div>
+    <div class="row" id="keyrow" hidden>
+      <input id="key" type="password" placeholder="X-API-Key" style="flex:1">
+      <button class="btn" id="saveKey">Save key</button>
+    </div>
+  </div>
+
+  <div id="summary"></div>
+  <div id="results"></div>
+</div>
+
+<script>
+(() => {
+  const $ = (s) => document.querySelector(s);
+  const ROLES = ["primary", "secondary", "tertiary"];
+  const store = {
+    get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+    set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+  };
+  let apiKey = store.get("tvmdbhex:key") || "";
+  const stats = { done: 0, flagged: 0, changed: 0 };
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const f = (v, d = 2) => (typeof v === "number" ? v.toFixed(d) : "–");
+  const pct = (v) => (v * 100).toFixed(1) + "%";
+
+  async function api(url, opts = {}) {
+    const headers = { ...(opts.headers || {}) };
+    if (apiKey) headers["X-API-Key"] = apiKey;
+    const res = await fetch(url, { ...opts, headers });
+    if (res.status === 401) { $("#keyrow").hidden = false; throw new Error("API key required"); }
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
+    return res.json();
+  }
+
+  function summary() {
+    $("#summary").textContent = stats.done
+      ? `${stats.done} analysed · primary changed on ${stats.changed} · ${stats.flagged} flagged`
+      : "";
+  }
+
+  function swatches(pal, size, cands) {
+    return ROLES.map((role) => {
+      const s = pal[role];
+      const c = cands && cands.find((x) => x.hex === s.hex);
+      const score = c && c.scores[role] !== undefined ? ` · score ${f(c.scores[role], 3)}` : "";
+      return `<div class="sw"><i class="${size}" style="background:${s.hex}"></i><div><b>${role}</b><br><code>${s.hex}</code><small>${pct(s.ratio)}${score}</small></div></div>`;
+    }).join("");
+  }
+
+  function render(card, name, src, r) {
+    const cur = r.current;
+    stats.done++;
+    if (r.flags.length) stats.flagged++;
+    if (cur.palette.primary.hex !== r.legacy.primary.hex) stats.changed++;
+    $("#ver").textContent = r.version;
+    summary();
+    card.dataset.flagged = r.flags.length ? "1" : "0";
+    applyFilter(card);
+    const rows = cur.candidates.map((c) => `
+      <tr class="${c.role || ""}">
+        <td><i class="chip" style="background:${c.hex}"></i><code>${c.hex}</code>${c.accent ? " ✦" : ""}</td>
+        <td>${pct(c.coverage)}</td><td>${f(c.lightness)}</td><td>${f(c.chroma, 3)}</td><td>${f(c.saturation)}</td>
+        <td>${f(c.distinctiveness)}</td><td>${f(c.contrast)}</td><td>${f(c.neutrality)}</td><td>${f(c.neutral_factor)}</td>
+        ${ROLES.map((role) => `<td>${f(c.scores[role], 3)}</td>`).join("")}
+        <td>${c.role || ""}</td>
+      </tr>`).join("");
+    const strip = cur.candidates.map((c) => `<span style="background:${c.hex};flex:${Math.max(c.coverage, 0.006)}" title="${c.hex} ${pct(c.coverage)}"></span>`).join("");
+    card.innerHTML = `
+      <img src="${src}" alt="">
+      <div style="min-width:0">
+        <h2>${esc(name)}</h2>
+        <div class="pal"><span class="lbl">New</span>${swatches(cur.palette, "big", cur.candidates)}</div>
+        <div class="pal"><span class="lbl">Old</span>${swatches(r.legacy, "small")}</div>
+        <div class="strip">${strip}</div>
+        <ul class="flags">${r.flags.map((x) => `<li>${esc(x)}</li>`).join("") || '<li class="ok">no flags</li>'}</ul>
+        <div class="meta">colourfulness ${f(cur.colourfulness, 3)} · colour strength ${f(cur.colour_strength)} · ✦ = accent-pass candidate</div>
+        <details><summary class="meta">${cur.candidates.length} candidates · features and scores</summary>
+          <div class="tablewrap"><table>
+            <tr><th>colour</th><th>coverage</th><th>L</th><th>chroma</th><th>sat</th><th>distinct</th><th>contrast</th><th>neutral</th><th>penalty×</th><th>P score</th><th>S score</th><th>T score</th><th>role</th></tr>
+            ${rows}
+          </table></div>
+        </details>
+      </div>`;
+  }
+
+  function applyFilter(card) {
+    card.hidden = $("#onlyFlagged").checked && card.dataset.flagged !== "1";
+  }
+
+  function placeholder(name) {
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `<div></div><div><h2>${esc(name)}</h2><span class="meta">Analysing…</span></div>`;
+    $("#results").appendChild(card);
+    return card;
+  }
+
+  // Run jobs a few at a time to keep the server and TMDB happy.
+  async function runAll(jobs) {
+    let i = 0;
+    const next = async () => {
+      while (i < jobs.length) await jobs[i++]();
+    };
+    await Promise.all([next(), next(), next()]);
+  }
+
+  function fileJob(file) {
+    const card = placeholder(file.name);
+    return async () => {
+      try {
+        const r = await api("/v1/debug/palette", { method: "POST", body: file, headers: { "Content-Type": file.type || "application/octet-stream" } });
+        render(card, file.name, URL.createObjectURL(file), r);
+      } catch (e) {
+        card.querySelector(".meta").outerHTML = `<span class="err">${esc(e.message)}</span>`;
+      }
+    };
+  }
+
+  function pathJob(path, name) {
+    const card = placeholder(name || path);
+    return async () => {
+      try {
+        const r = await api("/v1/debug/palette?poster_path=" + encodeURIComponent(path));
+        render(card, name || path, "https://image.tmdb.org/t/p/w342" + path, r);
+      } catch (e) {
+        card.querySelector(".meta").outerHTML = `<span class="err">${esc(e.message)}</span>`;
+      }
+    };
+  }
+
+  const drop = $("#drop");
+  drop.addEventListener("click", () => $("#files").click());
+  $("#files").addEventListener("change", (e) => runAll([...e.target.files].map(fileJob)));
+  drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+  drop.addEventListener("drop", (e) => {
+    e.preventDefault(); drop.classList.remove("over");
+    runAll([...e.dataTransfer.files].filter((x) => x.type.startsWith("image/")).map(fileJob));
+  });
+  $("#runPaths").addEventListener("click", () => {
+    const paths = $("#paths").value.split(/\s+/).map((p) => p.trim()).filter(Boolean)
+      .map((p) => (p.startsWith("/") ? p : "/" + p));
+    runAll(paths.map((p) => pathJob(p)));
+  });
+  $("#loadTop").addEventListener("click", async () => {
+    try {
+      const n = Math.min(Math.max(parseInt($("#topN").value, 10) || 30, 1), 200);
+      const rows = await api(`/v1/top?limit=${n}`);
+      runAll(rows.filter((t) => t.poster_path).map((t) => pathJob(t.poster_path, `#${t.rank} ${t.title || ""} (${t.media_type} ${t.tmdb_id})`)));
+    } catch (e) {
+      $("#summary").textContent = "Couldn't load titles: " + e.message;
+    }
+  });
+  $("#onlyFlagged").addEventListener("change", () => document.querySelectorAll(".card").forEach(applyFilter));
+  $("#saveKey").addEventListener("click", () => {
+    apiKey = $("#key").value.trim();
+    store.set("tvmdbhex:key", apiKey);
+    $("#keyrow").hidden = true;
+  });
+})();
+</script>
+</body>
+</html>

@@ -99,3 +99,21 @@ def test_top_interleaves_and_ranks(db_settings):
     assert [t["rank"] for t in c.get("/v1/top?offset=3&limit=5").json()] == [4, 5]
     assert [t["tmdb_id"] for t in c.get("/v1/top?media_type=tv").json()] == [101, 102]
     assert c.get("/v1/movie/1").json()["rank"] is None
+
+
+def test_debug_routes_only_when_enabled(tmp_path):
+    from conftest import make_poster, to_jpeg
+
+    off = TestClient(create_app(Settings(db_path=str(tmp_path / "a.db"))))
+    assert off.get("/debug").status_code == 404
+    assert off.post("/v1/debug/palette", content=b"x").status_code in (404, 405)
+
+    on = TestClient(create_app(Settings(db_path=str(tmp_path / "b.db"), debug=True)))
+    assert on.get("/debug").status_code == 200
+    img = to_jpeg(make_poster([((120, 190, 235), 0.6), ((236, 64, 152), 0.3), ((250, 250, 250), 0.1)]))
+    body = on.post("/v1/debug/palette", content=img, headers={"Content-Type": "image/jpeg"}).json()
+    assert set(body) == {"version", "current", "legacy", "flags"}
+    assert body["current"]["palette"]["primary"]["hex"].startswith("#")
+    assert body["current"]["candidates"][0]["scores"]
+    assert on.post("/v1/debug/palette", content=b"not an image").status_code == 400
+    assert on.get("/v1/debug/palette?poster_path=../../etc/passwd").status_code == 422
