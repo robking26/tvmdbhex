@@ -66,6 +66,7 @@ def main(argv: list[str] | None = None) -> None:
 
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # one line per request is too noisy
     settings = Settings.from_env()
 
     if args.command == "stats":

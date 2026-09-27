@@ -151,3 +151,14 @@ def test_sync_changes_requeues(settings, mock_tmdb):
     assert conn.execute("SELECT status FROM titles WHERE tmdb_id=550").fetchone()[0] == "pending"
     assert conn.execute("SELECT status FROM titles WHERE tmdb_id=9999").fetchone()[0] == "pending"
     assert db.get_state(conn, "changes:movie") == "2026-09-27"
+
+
+def test_pending_alternates_movie_and_tv(settings):
+    conn = db.connect(settings.db_target)
+    db.upsert_seed(conn, "movie", [{"id": i, "popularity": 10 - i} for i in range(1, 4)])
+    db.upsert_seed(conn, "tv", [{"id": 100 + i, "popularity": 1000 - i} for i in range(1, 3)])
+    assert db.pending(conn, None, False, True, 5, None) == [
+        ("movie", 1), ("tv", 101), ("movie", 2), ("tv", 102), ("movie", 3)
+    ]
+    assert db.pending(conn, None, False, True, 5, 2) == [("movie", 1), ("tv", 101)]
+    assert db.pending(conn, "tv", False, True, 5, None) == [("tv", 101), ("tv", 102)]

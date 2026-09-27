@@ -259,10 +259,16 @@ def pending(
     if not include_adult:
         sql += " AND adult = 0"
     sql += " ORDER BY popularity IS NULL, popularity DESC, tmdb_id"
-    if limit:
-        sql += " LIMIT ?"
-        params.append(limit)
-    return [(r[0], r[1]) for r in conn.execute(sql, params)]
+    by_type: dict[str, list[tuple[str, int]]] = {m: [] for m in MEDIA_TYPES}
+    for r in conn.execute(sql, params):
+        by_type[r[0]].append((r[0], r[1]))
+    # Movie and TV popularity scores aren't on the same scale, so rank each type
+    # separately and alternate: the Nth most popular movie next to the Nth TV series.
+    out: list[tuple[str, int]] = []
+    movies, shows = by_type["movie"], by_type["tv"]
+    for i in range(max(len(movies), len(shows))):
+        out.extend(x[i] for x in (movies, shows) if i < len(x))
+    return out[:limit] if limit else out
 
 
 def find_by_poster(conn: Connection, poster_path: str) -> Row | None:
