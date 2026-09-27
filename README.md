@@ -115,8 +115,9 @@ may need a paid plan once the backfill completes.
 `tvmdbhex serve` also serves a browser UI at **`/`** (e.g. http://localhost:8000/)
 for looking up any title and its colours:
 
-- Search by title or TMDB ID, filtered by All / Movies / TV. With an empty
-  search it shows the most popular titles that have colours.
+- With an empty search it shows the **Top 1,000** titles, ranked, with movies
+  and TV alternating. Search by title or TMDB ID to find anything else.
+  Filter by All / Movies / TV.
 - Each card shows the poster, a strip of the three colours sized by pixel
   share, and the hex codes.
 - Click a card for the detail view: large swatches with hex codes (click to
@@ -164,6 +165,12 @@ that isn't in the database returns `404`.
 ```
 
 Returns `{ "results": [...], "missing": [...] }`, with results in request order.
+
+### `GET /v1/top?media_type=movie&limit=60&offset=0`
+
+The most popular titles that have colours, as a ranked list (`rank` field).
+Movies and TV alternate: #1 is the most popular movie, #2 the most popular
+series, and so on. This is the website's default "Top 1,000" view.
 
 ### `GET /v1/search?q=…&media_type=movie&status=done&limit=24&offset=0`
 

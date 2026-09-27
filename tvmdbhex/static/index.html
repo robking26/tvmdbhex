@@ -80,6 +80,11 @@
   }
   .card:hover, .card:focus-visible { transform: translateY(-2px); border-color: var(--muted); outline: none; }
   .poster { aspect-ratio: 2 / 3; width: 100%; display: block; position: relative; background: var(--surface-2); }
+  .rank {
+    position: absolute; top: 8px; left: 8px; z-index: 1;
+    background: rgba(0,0,0,.72); color: #fff; font-size: 12px; font-weight: 600;
+    padding: 2px 7px; border-radius: 99px;
+  }
   .poster img { width: 100%; height: 100%; object-fit: cover; display: block; }
   .poster .fallback { position: absolute; inset: 0; display: grid; place-items: center; color: rgba(255,255,255,.85); font-size: 12px; text-shadow: 0 1px 2px rgba(0,0,0,.6); }
   .strip { display: flex; height: 22px; }
@@ -179,7 +184,8 @@
 
 <script>
 (() => {
-  const PAGE = 48;
+  const PAGE = 60;
+  const TOP = 1000; // the default view is the top 1,000; search reaches everything else
   const IMG = "https://image.tmdb.org/t/p/";
   const ROLES = ["primary", "secondary", "tertiary"];
   const STATUS_TEXT = {
@@ -247,8 +253,9 @@
     const key = `${t.media_type}/${t.tmdb_id}`;
     state.items.set(key, t);
     const sw = swatches(t);
-    return `<button class="card" data-key="${key}">
-      ${posterBlock(t, "w342")}
+    const rank = t.rank ? `<span class="rank">#${t.rank}</span>` : "";
+    return `<button class="card" data-key="${key}" style="position:relative">
+      ${rank}${posterBlock(t, "w342")}
       ${strip(t)}
       <div class="meta">
         <div class="t">${esc(t.title || "Untitled")}</div>
@@ -261,20 +268,26 @@
   async function load(reset) {
     const seq = ++state.seq;
     if (reset) { state.offset = 0; state.items.clear(); }
-    const params = new URLSearchParams({ limit: PAGE, offset: state.offset });
-    if (state.q) params.set("q", state.q); else params.set("status", "done");
+    const browsing = !state.q;
+    const limit = browsing ? Math.min(PAGE, TOP - state.offset) : PAGE;
+    const params = new URLSearchParams({ limit, offset: state.offset });
+    if (state.q) params.set("q", state.q);
     if (state.media) params.set("media_type", state.media);
     statusEl.textContent = "Loading…";
     try {
-      const rows = await api("/v1/search?" + params);
+      const rows = await api((browsing ? "/v1/top?" : "/v1/search?") + params);
       if (seq !== state.seq) return;
       if (reset) grid.innerHTML = "";
       grid.insertAdjacentHTML("beforeend", rows.map(card).join(""));
       state.offset += rows.length;
-      moreBtn.hidden = rows.length < PAGE;
+      moreBtn.hidden = rows.length < limit || (browsing && state.offset >= TOP);
       const n = grid.children.length;
+      const kind = state.media === "movie" ? "movies" : state.media === "tv" ? "TV series" : "titles";
       statusEl.textContent = n
-        ? (state.q ? `Results for “${state.q}”` : "Most popular titles with colours") + ` · ${n} shown`
+        ? (state.q
+            ? `Results for “${state.q}” · ${n} shown`
+            : `Top ${TOP.toLocaleString()} ${kind} by popularity · ${n} shown` +
+              (state.offset >= TOP ? " · search to find any other title" : ""))
         : "";
       if (!n) grid.innerHTML = `<div class="empty" style="grid-column:1/-1">${state.q ? "No titles match that search." : "No titles have been processed yet. Run <span class='mono'>tvmdbhex run</span> to fill the database."}</div>`;
     } catch (e) {

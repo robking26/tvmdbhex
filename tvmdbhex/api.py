@@ -30,6 +30,7 @@ class Colors(BaseModel):
 
 
 class TitleColors(BaseModel):
+    rank: int | None = Field(None, description="Popularity rank (only in /v1/top)")
     media_type: MediaType
     tmdb_id: int
     title: str | None
@@ -129,6 +130,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/v1/stats", dependencies=[Depends(require_key)])
     def stats(conn: db.Connection = Depends(get_conn)) -> dict:
         return db.stats(conn)
+
+    @app.get(
+        "/v1/top",
+        response_model=list[TitleColors],
+        dependencies=[Depends(require_key)],
+        summary="Most popular titles with colours, ranked (movies and TV alternating)",
+    )
+    def top(
+        media_type: MediaType | None = None,
+        limit: int = Query(60, ge=1, le=200),
+        offset: int = Query(0, ge=0, le=10_000),
+        conn: db.Connection = Depends(get_conn),
+    ) -> list[TitleColors]:
+        out = []
+        for rank, row in db.top_titles(conn, media_type, limit, offset):
+            model = _row_to_model(row)
+            model.rank = rank
+            out.append(model)
+        return out
 
     @app.get(
         "/v1/search",

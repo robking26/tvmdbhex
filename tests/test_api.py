@@ -82,3 +82,20 @@ def test_search(db_settings):
 def test_index_page_is_public(client):
     r = client.get("/", headers={"X-API-Key": ""})
     assert r.status_code == 200 and "tvmdbhex" in r.text
+
+
+def test_top_interleaves_and_ranks(db_settings):
+    settings = Settings(**db_settings)
+    conn = db.connect(settings.db_target)
+    db.upsert_seed(conn, "movie", [{"id": i, "title": f"M{i}", "popularity": 10 - i} for i in range(1, 4)])
+    db.upsert_seed(conn, "tv", [{"id": 100 + i, "title": f"T{i}", "popularity": 900 - i} for i in range(1, 3)])
+    for mt, i in [("movie", 1), ("movie", 2), ("movie", 3), ("tv", 101), ("tv", 102)]:
+        db.save_result(conn, mt, i, status="done", palette=PALETTE)
+    conn.close()
+    c = TestClient(create_app(settings))
+
+    got = [(t["rank"], t["media_type"], t["tmdb_id"]) for t in c.get("/v1/top").json()]
+    assert got == [(1, "movie", 1), (2, "tv", 101), (3, "movie", 2), (4, "tv", 102), (5, "movie", 3)]
+    assert [t["rank"] for t in c.get("/v1/top?offset=3&limit=5").json()] == [4, 5]
+    assert [t["tmdb_id"] for t in c.get("/v1/top?media_type=tv").json()] == [101, 102]
+    assert c.get("/v1/movie/1").json()["rank"] is None

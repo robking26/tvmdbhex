@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS titles (
 );
 CREATE INDEX IF NOT EXISTS idx_titles_poster ON titles (poster_path);
 CREATE INDEX IF NOT EXISTS idx_titles_popularity ON titles (status, popularity DESC);
+CREATE INDEX IF NOT EXISTS idx_titles_type_popularity ON titles (status, media_type, popularity DESC);
 
 CREATE TABLE IF NOT EXISTS sync_state (
     key   TEXT PRIMARY KEY,
@@ -376,6 +377,31 @@ def search(
         params += [query, f"{pattern}%"]
     params += [limit, offset]
     return conn.execute(sql, params).fetchall()
+
+
+def top_titles(
+    conn: Connection, media_type: str | None = None, limit: int = 60, offset: int = 0
+) -> list[tuple[int, Row]]:
+    """Titles with colours as a ranked list: [(rank, row), ...].
+
+    Ranked like the ingester (movie and TV alternating, each by popularity).
+    Titles are coloured in rank order, so this matches the catalogue ranking.
+    """
+    def fetch(mt: str, n: int) -> list[Row]:
+        return conn.execute(
+            f"SELECT {TITLE_COLUMNS} FROM titles WHERE status = 'done' AND media_type = ? "
+            "ORDER BY popularity IS NULL, popularity DESC, tmdb_id LIMIT ?",
+            (mt, n),
+        ).fetchall()
+
+    if media_type:
+        rows = fetch(media_type, offset + limit)
+    else:
+        movies, shows = fetch("movie", offset + limit), fetch("tv", offset + limit)
+        rows = []
+        for i in range(max(len(movies), len(shows))):
+            rows.extend(x[i] for x in (movies, shows) if i < len(x))
+    return list(enumerate(rows, start=1))[offset : offset + limit]
 
 
 def get_state(conn: Connection, key: str) -> str | None:
