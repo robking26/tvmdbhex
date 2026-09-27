@@ -101,7 +101,11 @@ class PostgresConnection:
             index = {d.name: i for i, d in enumerate(cursor.description or [])}
             return lambda values: Row(values, index)
 
-        self._conn = psycopg.connect(url, autocommit=autocommit, row_factory=row_factory)
+        # prepare_threshold=None: no server-side prepared statements, which can break
+        # behind transaction-mode poolers such as Neon's pooled DATABASE_URL.
+        self._conn = psycopg.connect(
+            url, autocommit=autocommit, row_factory=row_factory, prepare_threshold=None
+        )
 
     @staticmethod
     def _sql(sql: str) -> str:
