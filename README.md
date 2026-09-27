@@ -71,6 +71,26 @@ runs `tvmdbhex run` once a day, both sharing the same database volume.
 that takes about 8–9 hours. Popular titles are processed first, so the useful
 part of the catalogue is ready early on.
 
+## Website
+
+`tvmdbhex serve` also serves a browser UI at **`/`** (e.g. http://localhost:8000/)
+for looking up any title and its colours:
+
+- Search by title or TMDB ID, filtered by All / Movies / TV. With an empty
+  search it shows the most popular titles that have colours.
+- Each card shows the poster, a strip of the three colours sized by pixel
+  share, and the hex codes.
+- Click a card for the detail view: large swatches with hex codes (click to
+  copy), the share of the poster each colour covers, a preview of the colours
+  used together, and "Copy JSON".
+- Every title has a shareable link, e.g. `/#movie/550` or `/?q=matrix`.
+- If `TVMDBHEX_API_KEYS` is set, the page asks for a key once and keeps it in
+  that browser.
+- The page loads the poster images straight from TMDB's image CDN, so you
+  can check the colours against the poster. Turn this off with the
+  "Posters" toggle and it shows a gradient of the three colours instead.
+  Only the website does this. The API itself never contacts TMDB.
+
 ## API
 
 Interactive docs are at `/docs`. Every `/v1` route needs an `X-API-Key` header
@@ -105,6 +125,11 @@ that isn't in the database returns `404`.
 ```
 
 Returns `{ "results": [...], "missing": [...] }`, with results in request order.
+
+### `GET /v1/search?q=…&media_type=movie&status=done&limit=24&offset=0`
+
+Searches titles by name (substring) or TMDB ID. Exact matches come first,
+then the rest by popularity. With an empty `q` it browses by popularity.
 
 ### `GET /v1/{movie|tv}?after_id=0&limit=1000&updated_since=…`
 

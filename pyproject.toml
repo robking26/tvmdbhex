@@ -24,5 +24,8 @@ tvmdbhex = "tvmdbhex.cli:main"
 [tool.setuptools.packages.find]
 include = ["tvmdbhex*"]
 
+[tool.setuptools.package-data]
+tvmdbhex = ["static/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

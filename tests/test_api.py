@@ -54,3 +54,31 @@ def test_list_and_stats(client):
     assert [r["tmdb_id"] for r in client.get("/v1/movie").json()] == [550]
     assert client.get("/v1/movie?after_id=550").json() == []
     assert client.get("/v1/stats").json()["movie"] == {"done": 1, "no_poster": 1}
+
+
+def test_search(tmp_path):
+    settings = Settings(db_path=str(tmp_path / "s.db"))
+    conn = db.connect(settings.db_path)
+    db.upsert_seed(conn, "movie", [
+        {"id": 1, "title": "The Matrix", "popularity": 50},
+        {"id": 2, "title": "Matrix", "popularity": 5},
+        {"id": 3, "title": "100% Wolf", "popularity": 9},
+        {"id": 4, "title": "Some Film", "popularity": 99},
+    ])
+    db.save_result(conn, "movie", 4, status="done", title="Some Film", poster_path="/a.jpg", palette=PALETTE)
+    conn.close()
+    c = TestClient(create_app(settings))
+
+    ids = lambda r: [t["tmdb_id"] for t in r.json()]
+    assert ids(c.get("/v1/search?q=matrix")) == [2, 1]  # exact match first, then popularity
+    assert ids(c.get("/v1/search?q=%25")) == [3]  # LIKE wildcards are escaped
+    assert ids(c.get("/v1/search?q=4")) == [4]  # numeric query matches TMDB ID
+    assert ids(c.get("/v1/search")) == [4, 1, 3, 2]  # browse = popularity order
+    assert ids(c.get("/v1/search?status=done")) == [4]
+    assert ids(c.get("/v1/search?media_type=tv")) == []
+    assert ids(c.get("/v1/search?limit=2&offset=1")) == [1, 3]
+
+
+def test_index_page_is_public(client):
+    r = client.get("/", headers={"X-API-Key": ""})
+    assert r.status_code == 200 and "tvmdbhex" in r.text

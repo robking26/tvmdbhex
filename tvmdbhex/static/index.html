@@ -1,0 +1,409 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tvmdbhex</title>
+<style>
+  :root {
+    --bg: #0f0f11;
+    --surface: #18181b;
+    --surface-2: #222226;
+    --line: #2e2e33;
+    --text: #ececef;
+    --muted: #9a9aa3;
+    --accent: #e8e8ea;
+    --radius: 10px;
+    color-scheme: dark;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg: #f4f4f5;
+      --surface: #ffffff;
+      --surface-2: #ececef;
+      --line: #dcdce0;
+      --text: #18181b;
+      --muted: #62626b;
+      --accent: #18181b;
+      color-scheme: light;
+    }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  .wrap { max-width: 1200px; margin: 0 auto; padding: 0 16px; }
+
+  header { padding: 28px 0 12px; }
+  .brand { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .brand h1 { margin: 0; font-size: 22px; letter-spacing: -0.02em; }
+  .brand .dots { display: inline-flex; gap: 3px; margin-right: 8px; vertical-align: 2px; }
+  .brand .dots i { width: 10px; height: 10px; border-radius: 50%; display: block; }
+  #stats { color: var(--muted); font-size: 13px; }
+
+  .controls-wrap { position: sticky; top: 0; z-index: 5; background: var(--bg); }
+  .controls {
+    padding-top: 12px; padding-bottom: 14px;
+    display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+    border-bottom: 1px solid var(--line);
+  }
+  #q {
+    flex: 1 1 280px; min-width: 0;
+    background: var(--surface); color: var(--text);
+    border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 11px 14px; font: inherit; font-size: 16px;
+  }
+  #q:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .seg { display: inline-flex; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 3px; }
+  .seg button {
+    border: 0; background: none; color: var(--muted); font: inherit; font-size: 14px;
+    padding: 7px 12px; border-radius: 7px; cursor: pointer;
+  }
+  .seg button[aria-pressed="true"] { background: var(--surface-2); color: var(--text); }
+  label.toggle { color: var(--muted); font-size: 14px; display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+
+  #status { color: var(--muted); font-size: 14px; padding: 16px 0 4px; min-height: 20px; }
+
+  .grid {
+    display: grid; gap: 18px; padding: 10px 0 24px;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  }
+  .card {
+    background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+    overflow: hidden; cursor: pointer; text-align: left; padding: 0; color: inherit; font: inherit;
+    display: flex; flex-direction: column; transition: transform .12s ease, border-color .12s ease;
+  }
+  .card:hover, .card:focus-visible { transform: translateY(-2px); border-color: var(--muted); outline: none; }
+  .poster { aspect-ratio: 2 / 3; width: 100%; display: block; position: relative; background: var(--surface-2); }
+  .poster img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .poster .fallback { position: absolute; inset: 0; display: grid; place-items: center; color: rgba(255,255,255,.85); font-size: 12px; text-shadow: 0 1px 2px rgba(0,0,0,.6); }
+  .strip { display: flex; height: 22px; }
+  .strip span { display: block; }
+  .meta { padding: 8px 10px 10px; display: grid; gap: 2px; }
+  .meta .t { font-weight: 600; font-size: 14px; line-height: 1.25; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .meta .s { color: var(--muted); font-size: 12px; }
+  .hexes { display: flex; gap: 6px; font-size: 11px; color: var(--muted); flex-wrap: wrap; }
+  .badge { font-size: 11px; padding: 1px 6px; border-radius: 99px; background: var(--surface-2); color: var(--muted); justify-self: start; }
+
+  .more { display: flex; justify-content: center; padding: 0 0 48px; }
+  .btn {
+    background: var(--surface); color: var(--text); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 9px 16px; font: inherit; font-size: 14px; cursor: pointer;
+  }
+  .btn:hover { border-color: var(--muted); }
+
+  dialog {
+    border: 1px solid var(--line); border-radius: 14px; padding: 0;
+    background: var(--surface); color: var(--text);
+    width: min(860px, calc(100vw - 32px)); max-height: calc(100vh - 32px);
+  }
+  dialog::backdrop { background: rgba(0,0,0,.6); }
+  .detail { display: grid; grid-template-columns: 280px 1fr; }
+  .detail .poster { border-radius: 0; aspect-ratio: auto; min-height: 420px; height: 100%; }
+  .detail .body { padding: 22px 24px; display: grid; gap: 16px; align-content: start; }
+  .detail h2 { margin: 0; font-size: 22px; line-height: 1.2; }
+  .detail .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+  .close { position: absolute; top: 10px; right: 10px; width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--line); background: var(--surface); color: var(--text); cursor: pointer; font-size: 18px; line-height: 1; z-index: 2; }
+  .swatch { display: grid; grid-template-columns: 72px 1fr; gap: 14px; align-items: center; }
+  .swatch .chip { height: 72px; border-radius: 10px; border: 1px solid var(--line); }
+  .swatch .role { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+  .swatch .hex { font-size: 20px; background: none; border: 0; color: var(--text); padding: 0; cursor: pointer; }
+  .swatch .hex:hover { text-decoration: underline; }
+  .bar { height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; margin-top: 6px; }
+  .bar i { display: block; height: 100%; background: var(--muted); }
+  .swatch .pct { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .preview { border-radius: 10px; padding: 18px; font-weight: 600; font-size: 18px; }
+  .preview small { display: block; font-weight: 400; font-size: 13px; margin-top: 4px; opacity: .85; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .empty { color: var(--muted); padding: 40px 0; text-align: center; }
+
+  .keybox { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; margin: 18px 0; display: grid; gap: 10px; max-width: 520px; }
+  .keybox input { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px; font: inherit; }
+
+  #toast {
+    position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%) translateY(20px);
+    background: var(--text); color: var(--bg); padding: 8px 14px; border-radius: 99px; font-size: 13px;
+    opacity: 0; transition: all .18s ease; pointer-events: none; z-index: 20;
+  }
+  #toast.on { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  @media (max-width: 640px) {
+    .grid { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 12px; }
+    .detail { grid-template-columns: 1fr; }
+    .detail .poster { min-height: 0; height: 34vh; }
+    .detail .body { padding: 18px 16px; }
+  }
+</style>
+</head>
+<body>
+<header class="wrap">
+  <div class="brand">
+    <h1><span class="dots" aria-hidden="true"><i style="background:#E4572E"></i><i style="background:#F3A712"></i><i style="background:#29335C"></i></span>tvmdbhex</h1>
+    <span id="stats"></span>
+  </div>
+</header>
+
+<div class="controls-wrap">
+  <div class="wrap controls">
+    <input id="q" type="search" placeholder="Search a title or TMDB ID…" autocomplete="off" aria-label="Search titles">
+    <div class="seg" role="group" aria-label="Media type">
+      <button data-media="" aria-pressed="true">All</button>
+      <button data-media="movie" aria-pressed="false">Movies</button>
+      <button data-media="tv" aria-pressed="false">TV</button>
+    </div>
+    <label class="toggle"><input type="checkbox" id="showPosters" checked> Posters</label>
+  </div>
+</div>
+
+<main class="wrap">
+  <div id="keybox" class="keybox" hidden>
+    <strong>API key required</strong>
+    <span style="color:var(--muted);font-size:14px">This server has <span class="mono">TVMDBHEX_API_KEYS</span> set. Enter one of the keys to browse. It is kept in this browser only.</span>
+    <form id="keyform" class="row">
+      <input id="keyinput" type="password" placeholder="X-API-Key" style="flex:1" autocomplete="off">
+      <button class="btn" type="submit">Save</button>
+    </form>
+  </div>
+  <div id="status" role="status"></div>
+  <div id="grid" class="grid"></div>
+  <div class="more"><button id="more" class="btn" hidden>Load more</button></div>
+</main>
+
+<dialog id="dlg" aria-label="Title colours"></dialog>
+<div id="toast"></div>
+
+<script>
+(() => {
+  const PAGE = 48;
+  const IMG = "https://image.tmdb.org/t/p/";
+  const ROLES = ["primary", "secondary", "tertiary"];
+  const STATUS_TEXT = {
+    pending: "Not processed yet",
+    no_poster: "No poster on TMDB",
+    not_found: "Removed from TMDB",
+    error: "Failed, will retry",
+  };
+
+  const $ = (s) => document.querySelector(s);
+  const grid = $("#grid"), statusEl = $("#status"), moreBtn = $("#more"), dlg = $("#dlg");
+  const state = { q: "", media: "", offset: 0, seq: 0, items: new Map() };
+
+  const store = {
+    get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+    set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+  };
+  let apiKey = store.get("tvmdbhex:key") || "";
+  const showPosters = $("#showPosters");
+  showPosters.checked = store.get("tvmdbhex:posters") !== "0";
+
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+  function readable(hex) {
+    const n = parseInt(hex.slice(1), 16);
+    const lin = (c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
+    const L = 0.2126 * lin(n >> 16) + 0.7152 * lin((n >> 8) & 255) + 0.0722 * lin(n & 255);
+    return L > 0.4 ? "#111111" : "#FFFFFF";
+  }
+
+  async function api(path, opts = {}) {
+    const headers = { ...(opts.headers || {}) };
+    if (apiKey) headers["X-API-Key"] = apiKey;
+    const res = await fetch(path, { ...opts, headers });
+    if (res.status === 401) { $("#keybox").hidden = false; throw new Error("unauthorized"); }
+    $("#keybox").hidden = true;
+    if (!res.ok) throw new Error(res.status + " " + res.statusText);
+    return res.json();
+  }
+
+  function swatches(t) {
+    return t.colors ? ROLES.map((r) => t.colors[r]) : [];
+  }
+
+  function posterBlock(t, size) {
+    const sw = swatches(t);
+    const bg = sw.length
+      ? `linear-gradient(160deg, ${sw[0].hex} 0%, ${sw[0].hex} 45%, ${sw[1].hex} 75%, ${sw[2].hex} 100%)`
+      : "var(--surface-2)";
+    const img = showPosters.checked && t.poster_path
+      ? `<img loading="lazy" alt="" src="${IMG}${size}${esc(t.poster_path)}" onerror="this.remove()">`
+      : "";
+    const label = !img ? `<span class="fallback">${esc(t.poster_path ? "" : "No poster")}</span>` : "";
+    return `<div class="poster" style="background:${bg}">${label}${img}</div>`;
+  }
+
+  function strip(t) {
+    const sw = swatches(t);
+    if (!sw.length) return `<div class="strip" style="background:var(--surface-2)"></div>`;
+    const total = sw.reduce((a, s) => a + (s.ratio || 0), 0) || 1;
+    return `<div class="strip">${sw.map((s) => `<span style="background:${s.hex};flex:${Math.max((s.ratio || 0) / total, 0.08)}" title="${s.hex}"></span>`).join("")}</div>`;
+  }
+
+  function card(t) {
+    const key = `${t.media_type}/${t.tmdb_id}`;
+    state.items.set(key, t);
+    const sw = swatches(t);
+    return `<button class="card" data-key="${key}">
+      ${posterBlock(t, "w342")}
+      ${strip(t)}
+      <div class="meta">
+        <div class="t">${esc(t.title || "Untitled")}</div>
+        <div class="s">${t.media_type === "tv" ? "TV" : "Movie"} · ${t.tmdb_id}</div>
+        ${sw.length ? `<div class="hexes mono">${sw.map((s) => `<span>${s.hex}</span>`).join("")}</div>` : `<span class="badge">${esc(STATUS_TEXT[t.status] || t.status)}</span>`}
+      </div>
+    </button>`;
+  }
+
+  async function load(reset) {
+    const seq = ++state.seq;
+    if (reset) { state.offset = 0; state.items.clear(); }
+    const params = new URLSearchParams({ limit: PAGE, offset: state.offset });
+    if (state.q) params.set("q", state.q); else params.set("status", "done");
+    if (state.media) params.set("media_type", state.media);
+    statusEl.textContent = "Loading…";
+    try {
+      const rows = await api("/v1/search?" + params);
+      if (seq !== state.seq) return;
+      if (reset) grid.innerHTML = "";
+      grid.insertAdjacentHTML("beforeend", rows.map(card).join(""));
+      state.offset += rows.length;
+      moreBtn.hidden = rows.length < PAGE;
+      const n = grid.children.length;
+      statusEl.textContent = n
+        ? (state.q ? `Results for “${state.q}”` : "Most popular titles with colours") + ` · ${n} shown`
+        : "";
+      if (!n) grid.innerHTML = `<div class="empty" style="grid-column:1/-1">${state.q ? "No titles match that search." : "No titles have been processed yet. Run <span class='mono'>tvmdbhex run</span> to fill the database."}</div>`;
+    } catch (e) {
+      if (seq !== state.seq) return;
+      statusEl.textContent = e.message === "unauthorized" ? "" : "Couldn't load titles: " + e.message;
+    }
+  }
+
+  async function loadStats() {
+    try {
+      const s = await api("/v1/stats");
+      const sum = (o) => Object.values(o || {}).reduce((a, b) => a + b, 0);
+      const done = (s.movie?.done || 0) + (s.tv?.done || 0);
+      const all = sum(s.movie) + sum(s.tv);
+      $("#stats").textContent = `${done.toLocaleString()} of ${all.toLocaleString()} titles coloured · ${(s.movie?.done || 0).toLocaleString()} movies · ${(s.tv?.done || 0).toLocaleString()} TV`;
+    } catch {}
+  }
+
+  function detailHTML(t) {
+    const sw = swatches(t);
+    const rows = sw.map((s, i) => `
+      <div class="swatch">
+        <div class="chip" style="background:${s.hex}"></div>
+        <div>
+          <div class="role">${ROLES[i]}</div>
+          <button class="hex mono" data-copy="${s.hex}" title="Copy">${s.hex}</button>
+          <div class="bar"><i style="width:${(s.ratio * 100).toFixed(1)}%;background:${s.hex}"></i></div>
+          <div class="pct">${(s.ratio * 100).toFixed(1)}% of poster</div>
+        </div>
+      </div>`).join("");
+    const preview = sw.length ? `
+      <div class="preview" style="background:${sw[0].hex};color:${readable(sw[0].hex)};border-left:8px solid ${sw[1].hex};box-shadow: inset 0 -6px 0 ${sw[2].hex}">
+        ${esc(t.title || "Untitled")}
+        <small>Preview: primary background, secondary and tertiary accents</small>
+      </div>` : "";
+    const json = sw.length ? JSON.stringify({ primary: sw[0].hex, secondary: sw[1].hex, tertiary: sw[2].hex }) : "";
+    return `
+      <button class="close" aria-label="Close">×</button>
+      <div class="detail">
+        ${posterBlock(t, "w500")}
+        <div class="body">
+          <div>
+            <h2>${esc(t.title || "Untitled")}</h2>
+            <div class="sub">${t.media_type === "tv" ? "TV series" : "Movie"} · TMDB ${t.tmdb_id}${t.updated_at ? " · updated " + esc(t.updated_at.slice(0, 10)) : ""}</div>
+          </div>
+          ${sw.length ? rows : `<div class="badge" style="font-size:13px;padding:4px 10px">${esc(STATUS_TEXT[t.status] || t.status)}</div>`}
+          ${preview}
+          <div class="row">
+            ${json ? `<button class="btn" data-copy='${json}'>Copy JSON</button>` : ""}
+            <a class="btn" style="text-decoration:none" href="https://www.themoviedb.org/${t.media_type}/${t.tmdb_id}" target="_blank" rel="noopener">View on TMDB ↗</a>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function openDetail(t) {
+    dlg.innerHTML = detailHTML(t);
+    if (!dlg.open) dlg.showModal();
+    const h = `#${t.media_type}/${t.tmdb_id}`;
+    if (location.hash !== h) history.replaceState(null, "", location.pathname + location.search + h);
+  }
+
+  async function openFromHash() {
+    const m = location.hash.match(/^#(movie|tv)\/(\d+)$/);
+    if (!m) { if (dlg.open) dlg.close(); return; }
+    const key = `${m[1]}/${m[2]}`;
+    const cached = state.items.get(key);
+    if (cached) return openDetail(cached);
+    try { openDetail(await api(`/v1/${key}`)); }
+    catch (e) { toast(e.message.startsWith("404") ? "Title not in database" : "Couldn't load title"); }
+  }
+
+  let toastTimer;
+  function toast(msg) {
+    const el = $("#toast");
+    el.textContent = msg; el.classList.add("on");
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.remove("on"), 1400);
+  }
+
+  async function copy(text) {
+    try { await navigator.clipboard.writeText(text); toast("Copied " + text); }
+    catch { toast(text); }
+  }
+
+  // Events
+  let debounce;
+  $("#q").addEventListener("input", (e) => {
+    clearTimeout(debounce);
+    debounce = setTimeout(() => {
+      state.q = e.target.value.trim();
+      const url = new URL(location);
+      state.q ? url.searchParams.set("q", state.q) : url.searchParams.delete("q");
+      history.replaceState(null, "", url);
+      load(true);
+    }, 250);
+  });
+  document.querySelectorAll(".seg button").forEach((b) => b.addEventListener("click", () => {
+    document.querySelectorAll(".seg button").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+    state.media = b.dataset.media;
+    load(true);
+  }));
+  showPosters.addEventListener("change", () => { store.set("tvmdbhex:posters", showPosters.checked ? "1" : "0"); load(true); });
+  moreBtn.addEventListener("click", () => load(false));
+  grid.addEventListener("click", (e) => {
+    const c = e.target.closest(".card");
+    if (c) openDetail(state.items.get(c.dataset.key));
+  });
+  dlg.addEventListener("click", (e) => {
+    if (e.target === dlg || e.target.closest(".close")) return dlg.close();
+    const c = e.target.closest("[data-copy]");
+    if (c) copy(c.dataset.copy);
+  });
+  dlg.addEventListener("close", () => {
+    if (location.hash) history.replaceState(null, "", location.pathname + location.search);
+  });
+  window.addEventListener("hashchange", openFromHash);
+  $("#keyform").addEventListener("submit", (e) => {
+    e.preventDefault();
+    apiKey = $("#keyinput").value.trim();
+    store.set("tvmdbhex:key", apiKey);
+    loadStats(); load(true).then(openFromHash);
+  });
+
+  // Init
+  state.q = new URLSearchParams(location.search).get("q") || "";
+  $("#q").value = state.q;
+  loadStats();
+  load(true).then(openFromHash);
+})();
+</script>
+</body>
+</html>

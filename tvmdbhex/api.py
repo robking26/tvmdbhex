@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterator
+from importlib import resources
 from typing import Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from . import __version__, db
@@ -90,6 +92,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if settings.api_keys and x_api_key not in settings.api_keys:
             raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
 
+    index_html = resources.files("tvmdbhex").joinpath("static/index.html").read_text("utf-8")
+
+    @app.get("/", response_class=HTMLResponse, include_in_schema=False)
+    def index() -> str:
+        # The page shell is public; its data calls still need X-API-Key.
+        return index_html
+
     @app.get("/health")
     def health() -> dict:
         return {"status": "ok"}
@@ -97,6 +106,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/v1/stats", dependencies=[Depends(require_key)])
     def stats(conn: sqlite3.Connection = Depends(get_conn)) -> dict:
         return db.stats(conn)
+
+    @app.get(
+        "/v1/search",
+        response_model=list[TitleColors],
+        dependencies=[Depends(require_key)],
+        summary="Search titles by name or TMDB ID, most popular first",
+    )
+    def search(
+        q: str = Query("", max_length=200, description="Title substring or TMDB ID; empty = browse"),
+        media_type: MediaType | None = None,
+        status: str | None = Query(None, description="e.g. `done` to only return titles with colours"),
+        limit: int = Query(24, ge=1, le=100),
+        offset: int = Query(0, ge=0, le=10_000),
+        conn: sqlite3.Connection = Depends(get_conn),
+    ) -> list[TitleColors]:
+        rows = db.search(conn, q, media_type, status, limit, offset)
+        return [_row_to_model(r) for r in rows]
 
     @app.get(
         "/v1/{media_type}/{tmdb_id}",

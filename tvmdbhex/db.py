@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS titles (
 );
 CREATE INDEX IF NOT EXISTS idx_titles_status ON titles (status, media_type);
 CREATE INDEX IF NOT EXISTS idx_titles_poster ON titles (poster_path);
+CREATE INDEX IF NOT EXISTS idx_titles_popularity ON titles (status, popularity DESC);
 
 CREATE TABLE IF NOT EXISTS sync_state (
     key   TEXT PRIMARY KEY,
@@ -210,6 +211,44 @@ def save_result(
                 tmdb_id,
             ),
         )
+
+
+def search(
+    conn: sqlite3.Connection,
+    query: str = "",
+    media_type: str | None = None,
+    status: str | None = None,
+    limit: int = 24,
+    offset: int = 0,
+) -> list[sqlite3.Row]:
+    """Titles matching `query` (title substring or TMDB ID), most popular first."""
+    where, params = [], []
+    order = "popularity IS NULL, popularity DESC, tmdb_id"
+    query = query.strip()
+    if query:
+        pattern = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        clause = "title LIKE ? ESCAPE '\\'"
+        params.append(f"%{pattern}%")
+        if query.isdigit():
+            clause = f"({clause} OR tmdb_id = ?)"
+            params.append(int(query))
+        where.append(clause)
+        # Exact matches first, then titles starting with the query, then the rest.
+        order = "(title = ? COLLATE NOCASE) DESC, (title LIKE ? ESCAPE '\\') DESC, " + order
+    if media_type:
+        where.append("media_type = ?")
+        params.append(media_type)
+    if status:
+        where.append("status = ?")
+        params.append(status)
+    sql = f"SELECT {TITLE_COLUMNS} FROM titles"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += f" ORDER BY {order} LIMIT ? OFFSET ?"
+    if query:
+        params += [query, f"{pattern}%"]
+    params += [limit, offset]
+    return conn.execute(sql, params).fetchall()
 
 
 def get_state(conn: sqlite3.Connection, key: str) -> str | None:
