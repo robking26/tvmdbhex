@@ -1,0 +1,21 @@
+# API (what Hoozat talks to) + a daily ingester that keeps the database fresh.
+services:
+  api:
+    build: .
+    command: ["serve", "--port", "8000"]
+    env_file: .env
+    ports: ["8000:8000"]
+    volumes: ["tvmdbhex-data:/data"]
+    restart: unless-stopped
+
+  ingester:
+    build: .
+    entrypoint: ["/bin/sh", "-c"]
+    # Full run once a day (new titles, changed posters, retries of failures).
+    command: ["while true; do tvmdbhex run; sleep 86400; done"]
+    env_file: .env
+    volumes: ["tvmdbhex-data:/data"]
+    restart: unless-stopped
+
+volumes:
+  tvmdbhex-data:

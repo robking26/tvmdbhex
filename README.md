@@ -1,0 +1,124 @@
+# tvmdbhex
+
+Dominant poster colours for **every movie and TV series on TMDB**: primary,
+secondary and tertiary, as hex codes, served over a small HTTP API.
+
+This service stands on its own. It's the only thing that talks to TMDB.
+Clients such as **Hoozat** call this API and never call TMDB themselves.
+
+```
+TMDB ──(ingester)──> SQLite ──(read-only API)──> Hoozat
+```
+
+## How it works
+
+1. **Seed**: downloads TMDB's [daily ID exports](https://developer.themoviedb.org/docs/daily-id-exports)
+   (`movie_ids_*.json.gz`, `tv_series_ids_*.json.gz`), which list every title,
+   and inserts each one as `pending`.
+2. **Process**: for each pending title (most popular first) it calls
+   `/movie/{id}` or `/tv/{id}` to get `poster_path` and downloads the poster
+   (`w185` by default). It then extracts the three dominant colours. Titles that
+   share a poster file are only downloaded once.
+3. **Sync**: TMDB's `/movie/changes` and `/tv/changes` endpoints re-queue titles
+   edited since the last run, so new posters get new colours.
+
+`tvmdbhex run` does all three steps. Run it daily. It is resumable: stop it at
+any time and the next run carries on from where it stopped.
+
+### Colour extraction
+
+The poster is downscaled to 64×96, converted to CIELAB (perceptual colour
+space) and clustered with k-means (k=8, fixed seed, so results are
+reproducible). Clusters are ranked by the share of pixels they cover:
+
+- **primary**: the largest cluster
+- **secondary / tertiary**: the next largest clusters that are *visibly
+  different* (ΔE ≥ 15) from the colours already picked. Near-identical shades
+  of the same black don't take up all three slots.
+- Clusters covering less than 2% of the poster are ignored.
+- If a poster has fewer than three distinct colours, the slots fall back to
+  the next-largest cluster, then repeat the last colour.
+
+Each colour also carries a `ratio` (share of pixels, 0–1). This lets clients
+tell a colour that dominates the poster from one that only just made the cut.
+
+## Setup
+
+```bash
+cp .env.example .env         # add TMDB_READ_TOKEN (or TMDB_API_KEY) and TVMDBHEX_API_KEYS
+pip install -e '.[dev]'
+
+tvmdbhex run                 # seed + sync + process everything (long first run)
+tvmdbhex process --limit 500 # or process a batch (most popular first)
+tvmdbhex stats               # counts by status
+tvmdbhex serve --port 8000   # start the API
+```
+
+Or with Docker: `docker compose up -d` starts the API plus an ingester that
+runs `tvmdbhex run` once a day, both sharing the same database volume.
+
+| Variable | Default | |
+|---|---|---|
+| `TMDB_READ_TOKEN` / `TMDB_API_KEY` | – | TMDB credentials (ingester only) |
+| `TVMDBHEX_DB_PATH` | `data/tvmdbhex.db` | SQLite file |
+| `TVMDBHEX_API_KEYS` | *(empty = no auth)* | Comma-separated keys accepted in `X-API-Key` |
+| `TVMDBHEX_CONCURRENCY` | `16` | Parallel workers |
+| `TVMDBHEX_REQUESTS_PER_SECOND` | `40` | TMDB API rate cap (TMDB allows ~50/s) |
+| `TVMDBHEX_POSTER_SIZE` | `w185` | Poster size downloaded for analysis |
+| `TVMDBHEX_INCLUDE_ADULT` | `false` | Also process titles flagged adult |
+
+**First run:** TMDB lists roughly 1M+ movies and 200k+ series. At 40 req/s
+that takes about 8–9 hours. Popular titles are processed first, so the useful
+part of the catalogue is ready early on.
+
+## API
+
+Interactive docs are at `/docs`. Every `/v1` route needs an `X-API-Key` header
+when `TVMDBHEX_API_KEYS` is set.
+
+### `GET /v1/{movie|tv}/{tmdb_id}`
+
+```json
+{
+  "media_type": "movie",
+  "tmdb_id": 550,
+  "title": "Fight Club",
+  "poster_path": "/pB8BM7pdSp6B6Ih7QZ4DrQ3PmJK.jpg",
+  "status": "done",
+  "colors": {
+    "primary":   { "hex": "#1C1B1D", "ratio": 0.4812 },
+    "secondary": { "hex": "#D8C6B4", "ratio": 0.2127 },
+    "tertiary":  { "hex": "#C0364A", "ratio": 0.0831 }
+  },
+  "updated_at": "2026-09-27T10:00:00+00:00"
+}
+```
+
+(Illustrative values.) `status` is one of `done`, `pending`, `no_poster`,
+`not_found` or `error`. `colors` is `null` unless the status is `done`. An ID
+that isn't in the database returns `404`.
+
+### `POST /v1/lookup`: batch (up to 500)
+
+```json
+{ "items": [ { "media_type": "movie", "tmdb_id": 550 }, { "media_type": "tv", "tmdb_id": 1399 } ] }
+```
+
+Returns `{ "results": [...], "missing": [...] }`, with results in request order.
+
+### `GET /v1/{movie|tv}?after_id=0&limit=1000&updated_since=…`
+
+Pages through every processed title, ordered by ID. Use it to bulk-sync or
+cache the whole dataset: pass the last `tmdb_id` you received as `after_id`.
+
+### `GET /v1/stats`, `GET /health`
+
+Counts by status, and a liveness check.
+
+## Tests
+
+```bash
+pytest
+```
+
+TMDB is mocked in the tests, so they run offline.
