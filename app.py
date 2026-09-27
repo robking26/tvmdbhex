@@ -16,15 +16,12 @@ from fastapi.responses import JSONResponse  # noqa: E402
 from tvmdbhex.api import create_app  # noqa: E402
 from tvmdbhex.config import Settings  # noqa: E402
 
-settings = Settings.from_env()
 
-if settings.database_url:
-    app = create_app(settings)
-else:
+def _not_configured() -> FastAPI:
     # Vercel's filesystem is read-only, so there's no SQLite fallback here.
-    app = FastAPI()
+    fallback = FastAPI()
 
-    @app.api_route("/{path:path}", methods=["GET", "POST"])
+    @fallback.api_route("/{path:path}", methods=["GET", "POST"])
     def not_configured(path: str) -> JSONResponse:
         return JSONResponse(
             status_code=503,
@@ -34,3 +31,11 @@ else:
                 "this project (sets DATABASE_URL), then redeploy.",
             },
         )
+
+    return fallback
+
+
+settings = Settings.from_env()
+
+# Vercel finds the entrypoint by looking for a top-level `app` assignment.
+app = create_app(settings) if settings.database_url else _not_configured()
