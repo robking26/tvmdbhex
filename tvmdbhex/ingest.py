@@ -42,53 +42,73 @@ async def _palette_for(client: TMDBClient, settings: Settings, poster_path: str)
 
 
 async def process_one(
-    conn: db.Connection,
     client: TMDBClient,
     settings: Settings,
     media_type: str,
     tmdb_id: int,
-    inflight: dict[str, asyncio.Task] | None = None,
-) -> str:
+    inflight: dict[str, asyncio.Task],
+    posters: dict[str, list[tuple[str, float]]],
+) -> dict:
+    """Fetch one title's poster colours. Returns the result to store (no DB access)."""
+    key = {"media_type": media_type, "tmdb_id": tmdb_id}
     try:
         details = await client.details(media_type, tmdb_id)
     except NotFound:
-        db.save_result(conn, media_type, tmdb_id, status=db.NOT_FOUND)
-        return db.NOT_FOUND
+        return {**key, "status": db.NOT_FOUND}
 
     title = details.get("title") or details.get("name")
     adult = bool(details.get("adult", False))
     poster_path = details.get("poster_path")
     if not poster_path:
-        db.save_result(conn, media_type, tmdb_id, status=db.NO_POSTER, title=title, adult=adult)
-        return db.NO_POSTER
+        return {**key, "status": db.NO_POSTER, "title": title, "adult": adult}
 
-    existing = db.find_by_poster(conn, poster_path)
-    if existing is not None:
-        palette = [
-            (existing["primary_hex"], existing["primary_ratio"]),
-            (existing["secondary_hex"], existing["secondary_ratio"]),
-            (existing["tertiary_hex"], existing["tertiary_ratio"]),
-        ]
-    else:
+    # Poster files are immutable, so colours computed once can be reused by any title.
+    palette = posters.get(poster_path)
+    if palette is None:
         # Titles processed concurrently may share a poster file: download it once.
-        inflight = {} if inflight is None else inflight
         task = inflight.get(poster_path)
         if task is None:
             task = inflight[poster_path] = asyncio.ensure_future(_palette_for(client, settings, poster_path))
             task.add_done_callback(lambda _: inflight.pop(poster_path, None))
         palette = await asyncio.shield(task)
+        posters[poster_path] = palette
 
-    db.save_result(
-        conn,
-        media_type,
-        tmdb_id,
-        status=db.DONE,
-        title=title,
-        adult=adult,
-        poster_path=poster_path,
-        palette=palette,
-    )
-    return db.DONE
+    return {
+        **key,
+        "status": db.DONE,
+        "title": title,
+        "adult": adult,
+        "poster_path": poster_path,
+        "palette": palette,
+    }
+
+
+class _BatchWriter:
+    """Buffers results and writes them in batches off the event loop.
+
+    Per-title writes cost several round trips each; to a remote database
+    (e.g. Neon from a CI runner) that, not TMDB, was the bottleneck.
+    """
+
+    def __init__(self, conn: db.Connection, batch_size: int = 200, max_delay: float = 5.0):
+        self.conn = conn
+        self.batch_size = batch_size
+        self.max_delay = max_delay
+        self.buffer: list[dict] = []
+        self.lock = asyncio.Lock()
+        self.last_flush = time.monotonic()
+
+    async def add(self, result: dict) -> None:
+        self.buffer.append(result)
+        if len(self.buffer) >= self.batch_size or time.monotonic() - self.last_flush > self.max_delay:
+            await self.flush()
+
+    async def flush(self) -> None:
+        async with self.lock:
+            batch, self.buffer = self.buffer, []
+            self.last_flush = time.monotonic()
+            if batch:
+                await asyncio.to_thread(db.save_results, self.conn, batch)
 
 
 async def process(
@@ -104,13 +124,17 @@ async def process(
     todo = db.pending(
         conn, media_type, settings.include_adult, retry_errors, MAX_ATTEMPTS, limit, settings.max_titles
     )
-    log.info("processing %d titles with %d workers", len(todo), settings.concurrency)
+    posters = db.poster_palettes(conn)
+    log.info(
+        "processing %d titles with %d workers (%d known posters)", len(todo), settings.concurrency, len(posters)
+    )
     queue: asyncio.Queue[tuple[str, int]] = asyncio.Queue()
     for item in todo:
         queue.put_nowait(item)
 
     counts: dict[str, int] = {}
     inflight: dict[str, asyncio.Task] = {}
+    writer = _BatchWriter(conn)
     started = time.monotonic()
     deadline = started + max_minutes * 60 if max_minutes else None
 
@@ -123,18 +147,22 @@ async def process(
             except asyncio.QueueEmpty:
                 return
             try:
-                status = await process_one(conn, client, settings, mt, tmdb_id, inflight)
+                result = await process_one(client, settings, mt, tmdb_id, inflight, posters)
             except Exception as exc:  # keep going; retried on the next run
                 log.warning("%s/%s failed: %s", mt, tmdb_id, exc)
-                db.save_result(conn, mt, tmdb_id, status=db.ERROR, error=str(exc)[:500])
-                status = db.ERROR
+                result = {"media_type": mt, "tmdb_id": tmdb_id, "status": db.ERROR, "error": str(exc)[:500]}
+            await writer.add(result)
+            status = result["status"]
             counts[status] = counts.get(status, 0) + 1
             done = sum(counts.values())
             if done % 1000 == 0:
                 rate = done / max(time.monotonic() - started, 1e-6)
                 log.info("%d/%d done (%.1f/s) %s", done, len(todo), rate, counts)
 
-    await asyncio.gather(*(worker() for _ in range(max(1, settings.concurrency))))
+    try:
+        await asyncio.gather(*(worker() for _ in range(max(1, settings.concurrency))))
+    finally:
+        await writer.flush()
     log.info("finished: %s", counts)
     return counts
 

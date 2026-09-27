@@ -279,38 +279,47 @@ def pending(
     return out[:limit] if limit else out
 
 
-def find_by_poster(conn: Connection, poster_path: str) -> Row | None:
-    """Reuse colours when another title already has the exact same poster file."""
-    return conn.execute(
-        "SELECT * FROM titles WHERE poster_path = ? AND status = 'done' LIMIT 1",
-        (poster_path,),
-    ).fetchone()
+def save_result(conn: Connection, media_type: str, tmdb_id: int, **fields: Any) -> None:
+    save_results(conn, [{"media_type": media_type, "tmdb_id": tmdb_id, **fields}])
 
 
-def save_result(
-    conn: Connection,
-    media_type: str,
-    tmdb_id: int,
-    *,
-    status: str,
-    title: str | None = None,
-    adult: bool | None = None,
-    poster_path: str | None = None,
-    palette: list[tuple[str, float]] | None = None,
-    error: str | None = None,
-) -> None:
-    colours: list = [None] * 6
-    if palette:
-        colours = [v for swatch in palette for v in swatch]
+def save_results(conn: Connection, results: list[dict]) -> None:
+    """Store processing outcomes in one transaction (two round trips per batch).
+
+    Each result: media_type, tmdb_id, status and optionally title, adult,
+    poster_path, palette [(hex, ratio) x3], error.
+    """
+    if not results:
+        return
+    ts = now_iso()
+    updates = []
+    for r in results:
+        palette = r.get("palette")
+        colours = [v for swatch in palette for v in swatch] if palette else [None] * 6
+        adult = r.get("adult")
+        updates.append(
+            (
+                r.get("title"),
+                None if adult is None else int(adult),
+                r.get("poster_path"),
+                *colours,
+                r["status"],
+                r.get("error"),
+                int(r["status"] == ERROR),
+                ts,
+                r["media_type"],
+                r["tmdb_id"],
+            )
+        )
     with transaction(conn):
-        conn.execute(
+        conn.executemany(
             """
             INSERT INTO titles (media_type, tmdb_id, updated_at) VALUES (?, ?, ?)
             ON CONFLICT (media_type, tmdb_id) DO NOTHING
             """,
-            (media_type, tmdb_id, now_iso()),
+            [(r["media_type"], r["tmdb_id"], ts) for r in results],
         )
-        conn.execute(
+        conn.executemany(
             """
             UPDATE titles SET
                 title = COALESCE(?, title),
@@ -325,19 +334,17 @@ def save_result(
                 updated_at = ?
             WHERE media_type = ? AND tmdb_id = ?
             """,
-            (
-                title,
-                None if adult is None else int(adult),
-                poster_path,
-                *colours,
-                status,
-                error,
-                int(status == ERROR),
-                now_iso(),
-                media_type,
-                tmdb_id,
-            ),
+            updates,
         )
+
+
+def poster_palettes(conn: Connection) -> dict[str, list[tuple[str, float]]]:
+    """poster_path -> palette for every processed title, to reuse without re-downloading."""
+    rows = conn.execute(
+        "SELECT poster_path, primary_hex, primary_ratio, secondary_hex, secondary_ratio, "
+        "tertiary_hex, tertiary_ratio FROM titles WHERE status = 'done' AND poster_path IS NOT NULL"
+    )
+    return {r[0]: [(r[1], r[2]), (r[3], r[4]), (r[5], r[6])] for r in rows}
 
 
 def search(
