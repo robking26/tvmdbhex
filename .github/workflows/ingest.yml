@@ -17,7 +17,7 @@ on:
         description: "Max titles to process in this run (blank = no batch limit)"
         required: false
       top:
-        description: "Only ever process the N most popular titles"
+        description: "Only process titles ranked in the top N (the stored catalogue stays 500k)"
         required: false
         default: "500000"
 
@@ -49,7 +49,9 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           TMDB_READ_TOKEN: ${{ secrets.TMDB_READ_TOKEN }}
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
-          # Catalogue cap: scheduled runs have no inputs, so they use 500000 too.
+          # Catalogue size: only the top 500k are stored; uncoloured titles below it are pruned.
+          TVMDBHEX_CATALOGUE_SIZE: "500000"
+          # This run only processes titles ranked within `top` (scheduled runs: 500000).
           TVMDBHEX_MAX_TITLES: ${{ inputs.top || '500000' }}
         # Stops cleanly before the 6h job limit; the next run carries on.
         run: tvmdbhex run --max-minutes 320 ${{ inputs.limit && format('--limit {0}', inputs.limit) || '' }}

@@ -31,9 +31,9 @@ async def _run(args: argparse.Namespace, settings: Settings) -> dict:
             settings.tmdb_api_key, settings.tmdb_read_token, settings.requests_per_second
         ) as client:
             media_types = _media_types(args.media)
-            top = settings.max_titles
+            size = settings.catalogue_size  # seed/prune: catalogue size only, never the run's --top
             if args.command == "seed":
-                return await ingest.seed(conn, client, media_types, top, settings.include_adult)
+                return await ingest.seed(conn, client, media_types, size, settings.include_adult)
             if args.command == "sync":
                 return await ingest.sync_changes(conn, client, media_types)
             if args.command == "process":
@@ -41,9 +41,9 @@ async def _run(args: argparse.Namespace, settings: Settings) -> dict:
                 return await ingest.process(conn, client, settings, media, args.limit, args.max_minutes)
             if args.command == "run":  # full refresh: seed + changes + process
                 result = {}
-                if top:  # prune first: frees space before the seed writes anything
-                    result["pruned"] = ingest.prune(conn, top, settings.include_adult)
-                result["seed"] = await ingest.seed(conn, client, media_types, top, settings.include_adult)
+                if size:  # prune first: frees space before the seed writes anything
+                    result["pruned"] = ingest.prune(conn, size, settings.include_adult)
+                result["seed"] = await ingest.seed(conn, client, media_types, size, settings.include_adult)
                 result["sync"] = await ingest.sync_changes(conn, client, media_types)
                 media = None if args.media == "all" else args.media
                 result["process"] = await ingest.process(
@@ -62,13 +62,14 @@ def main(argv: list[str] | None = None) -> None:
         ("seed", "Load every movie/TV ID from TMDB's daily export"),
         ("sync", "Re-queue titles changed on TMDB since the last sync"),
         ("process", "Fetch posters and extract colours for pending titles"),
-        ("run", "prune + seed + sync + process (use this on a daily schedule)"),
+        ("run", "prune + seed (catalogue size) + sync + process (use this on a daily schedule)"),
     ]:
         p = sub.add_parser(name, help=help_text)
         p.add_argument("--media", choices=["movie", "tv", "all"], default="all")
         p.add_argument(
             "--top", type=int, default=None,
-            help="Only store/process the N most popular titles overall (default: TVMDBHEX_MAX_TITLES)",
+            help="Only process titles ranked in the top N this run (default: TVMDBHEX_MAX_TITLES); "
+            "the catalogue size (TVMDBHEX_CATALOGUE_SIZE) is separate",
         )
         if name in ("process", "run"):
             p.add_argument("--limit", type=int, default=None, help="Max titles to process")
@@ -76,8 +77,8 @@ def main(argv: list[str] | None = None) -> None:
                 "--max-minutes", type=float, default=None,
                 help="Stop cleanly after this long (e.g. to fit a CI job limit); resumes next run",
             )
-    prune = sub.add_parser("prune", help="Delete uncoloured titles ranked below --top and vacuum")
-    prune.add_argument("--top", type=int, default=None, help="Default: TVMDBHEX_MAX_TITLES")
+    prune = sub.add_parser("prune", help="Delete uncoloured titles ranked below the catalogue size and vacuum")
+    prune.add_argument("--size", type=int, default=None, help="Catalogue size (default: TVMDBHEX_CATALOGUE_SIZE)")
     sub.add_parser("stats", help="Show counts by status")
     serve = sub.add_parser("serve", help="Run the HTTP API")
     serve.add_argument("--host", default="0.0.0.0")
@@ -87,15 +88,15 @@ def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)  # one line per request is too noisy
     settings = Settings.from_env()
-    if getattr(args, "top", None):
+    if getattr(args, "top", None) and args.command != "prune":
         settings = dataclasses.replace(settings, max_titles=args.top)
 
     if args.command == "prune":
-        top = args.top or settings.max_titles
-        if not top:
-            parser.error("prune needs --top or TVMDBHEX_MAX_TITLES")
+        size = args.size or settings.catalogue_size
+        if not size:
+            parser.error("prune needs --size or TVMDBHEX_CATALOGUE_SIZE")
         conn = db.connect(settings.db_target)
-        print(json.dumps({"pruned": ingest.prune(conn, top, settings.include_adult)}))
+        print(json.dumps({"pruned": ingest.prune(conn, size, settings.include_adult)}))
         return
     if args.command == "stats":
         conn = db.connect(settings.db_target)

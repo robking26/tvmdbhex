@@ -135,7 +135,8 @@ runs `tvmdbhex run` once a day, both sharing the same database volume.
 | `TVMDBHEX_POSTER_SIZE` | `w342` | Poster size downloaded for analysis (logos are fetched at w300) |
 | `TVMDBHEX_INCLUDE_ADULT` | `false` | Also process titles flagged adult |
 | `TVMDBHEX_DEBUG` | `false` | Enables `/debug` and `/v1/debug/*` palette tuning tools |
-| `TVMDBHEX_MAX_TITLES` | *(no cap)* | Only ever process the N most popular titles (the Vercel ingest workflow uses 500000). Titles below the cap stay `pending` |
+| `TVMDBHEX_CATALOGUE_SIZE` | *(unlimited)* | Store only the N most popular titles; prune uncoloured ones below it (workflow: 500000) |
+| `TVMDBHEX_MAX_TITLES` | *(no cap)* | A run only processes titles ranked in the top N (`--top`; never shrinks the catalogue) |
 
 **First run:** TMDB lists roughly 1M+ movies and 200k+ series. At 40 req/s
 that takes about 8–9 hours. Popular titles are processed first, so the useful

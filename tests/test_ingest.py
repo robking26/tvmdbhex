@@ -242,3 +242,26 @@ def test_prune_deletes_uncoloured_titles_below_cap(settings):
     left = sorted(r[0] for r in conn.execute("SELECT tmdb_id FROM titles"))
     assert left == [1, 2, 3, 6]
     assert db.prune(conn, top=3) == 0
+
+
+def test_run_top_never_shrinks_the_catalogue(tmp_path, mock_tmdb, monkeypatch, capsys):
+    """Regression: `run --top 1` once pruned every uncoloured title below rank 1."""
+    import json as _json
+
+    from tvmdbhex import cli
+
+    path = str(tmp_path / "run.db")
+    monkeypatch.setenv("TVMDBHEX_DB_PATH", path)
+    monkeypatch.setenv("TMDB_READ_TOKEN", "t")
+    monkeypatch.setenv("TVMDBHEX_REQUESTS_PER_SECOND", "0")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("TVMDBHEX_CATALOGUE_SIZE", "10")
+    mock_tmdb.get(url__regex=r".*/(movie|tv)/changes.*").respond(json={"results": [], "total_pages": 1})
+
+    cli.main(["run", "--top", "1"])
+    out = _json.loads(capsys.readouterr().out)
+    assert out["pruned"] == 0
+    conn = db.connect(path)
+    # All 5 non-adult titles stay stored; only the top-ranked one was processed.
+    assert conn.execute("SELECT COUNT(*) FROM titles").fetchone()[0] == 5
+    assert out["process"] == {"done": 1}

@@ -49,7 +49,11 @@ class Settings:
     requests_per_second: float = 40.0
     poster_size: str = "w342"  # enough detail to find and sample the title treatment
     include_adult: bool = False
-    max_titles: int | None = None  # only ever process the N most popular titles
+    max_titles: int | None = None  # this run: only process titles ranked in the top N
+    # Catalogue size: only the N most popular titles are stored at all (seed)
+    # and uncoloured titles ranked below it are deleted (prune). Deliberately
+    # separate from max_titles, so a small test run can never shrink the catalogue.
+    catalogue_size: int | None = None
     debug: bool = False  # enables /debug and /v1/debug/* (palette tuning tools)
 
     @property
@@ -76,5 +80,8 @@ class Settings:
             poster_size=os.environ.get("TVMDBHEX_POSTER_SIZE", cls.poster_size),
             include_adult=_bool(os.environ.get("TVMDBHEX_INCLUDE_ADULT"), cls.include_adult),
             max_titles=int(os.environ["TVMDBHEX_MAX_TITLES"]) if os.environ.get("TVMDBHEX_MAX_TITLES") else None,
+            catalogue_size=(
+                int(os.environ["TVMDBHEX_CATALOGUE_SIZE"]) if os.environ.get("TVMDBHEX_CATALOGUE_SIZE") else None
+            ),
             debug=_bool(os.environ.get("TVMDBHEX_DEBUG")),
         )
