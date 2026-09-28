@@ -98,12 +98,19 @@ class TMDBClient:
             return resp
         raise RuntimeError("unreachable")
 
-    async def details(self, media_type: str, tmdb_id: int) -> dict:
-        resp = await self._request(f"{API_BASE}/{media_type}/{tmdb_id}")
+    async def details(self, media_type: str, tmdb_id: int, with_images: bool = False) -> dict:
+        """Title details. with_images also returns the title's logos (official
+        title treatments as transparent PNGs) in the same request."""
+        params = {"append_to_response": "images", "include_image_language": "en,null"} if with_images else None
+        resp = await self._request(f"{API_BASE}/{media_type}/{tmdb_id}", params)
         return resp.json()
 
     async def poster(self, poster_path: str, size: str = "w185") -> bytes:
         resp = await self._request(f"{IMAGE_BASE}/{size}{poster_path}", api=False)
+        return resp.content
+
+    async def image(self, path: str, size: str) -> bytes:
+        resp = await self._request(f"{IMAGE_BASE}/{size}{path}", api=False)
         return resp.content
 
     async def changes(self, media_type: str, start: date, end: date) -> set[int]:
@@ -150,3 +157,22 @@ def parse_export(media_type: str, gz_bytes: bytes) -> Iterator[dict]:
             "adult": item.get("adult", False),
             "popularity": item.get("popularity"),
         }
+
+
+def pick_logo(details: dict) -> str | None:
+    """Best title-treatment logo from a details response fetched with_images:
+    English first, then language-neutral; PNG only (TMDB also has SVG logos,
+    which Pillow can't read); highest-voted, then widest."""
+    logos = (details.get("images") or {}).get("logos") or []
+    usable = [lg for lg in logos if str(lg.get("file_path", "")).lower().endswith(".png")]
+    if not usable:
+        return None
+    lang_rank = {"en": 0, None: 1}
+    usable.sort(
+        key=lambda lg: (
+            lang_rank.get(lg.get("iso_639_1"), 2),
+            -(lg.get("vote_average") or 0),
+            -(lg.get("width") or 0),
+        )
+    )
+    return usable[0]["file_path"]
