@@ -55,13 +55,24 @@ class LookupResponse(BaseModel):
 
 
 def _row_to_model(row: db.Row) -> TitleColors:
+    # All six palette columns are nullable and `status` is not a promise about them: the
+    # schema lets a row be `done` with any subset present. Testing `primary_hex` alone was
+    # enough while writes came from `save_results`, which stores three swatches or none —
+    # but a row with two, or with a hex and no ratio, made `Swatch` raise, and an
+    # exception here is a 500 for whatever asked. `/v1/lookup` asks about hundreds at a
+    # time, so one such row took the whole batch with it.
+    #
+    # `colors: null` is what this returns instead, which is a documented answer rather
+    # than a repair: it is the same thing a pending title or one with no poster gets.
+    swatches = [
+        (row["primary_hex"], row["primary_ratio"]),
+        (row["secondary_hex"], row["secondary_ratio"]),
+        (row["tertiary_hex"], row["tertiary_ratio"]),
+    ]
     colors = None
-    if row["status"] == db.DONE and row["primary_hex"]:
-        colors = Colors(
-            primary=Swatch(hex=row["primary_hex"], ratio=row["primary_ratio"]),
-            secondary=Swatch(hex=row["secondary_hex"], ratio=row["secondary_ratio"]),
-            tertiary=Swatch(hex=row["tertiary_hex"], ratio=row["tertiary_ratio"]),
-        )
+    if row["status"] == db.DONE and all(hex_ and ratio is not None for hex_, ratio in swatches):
+        primary, secondary, tertiary = (Swatch(hex=h, ratio=r) for h, r in swatches)
+        colors = Colors(primary=primary, secondary=secondary, tertiary=tertiary)
     return TitleColors(
         media_type=row["media_type"],
         tmdb_id=row["tmdb_id"],
@@ -71,6 +82,9 @@ def _row_to_model(row: db.Row) -> TitleColors:
         colors=colors,
         updated_at=row["updated_at"],
     )
+
+
+log = logging.getLogger("tvmdbhex.api")
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -198,7 +212,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 (media_type, *ids),
             )
             for row in rows:
-                found[(row["media_type"], row["tmdb_id"])] = _row_to_model(row)
+                key = (row["media_type"], row["tmdb_id"])
+                try:
+                    found[key] = _row_to_model(row)
+                except Exception as exc:
+                    # **One row must never cost the batch**, which is the fault that
+                    # brought this endpoint down: a caller asking about a whole
+                    # filmography got a 500 and nothing, where the one title at fault
+                    # should simply have come back as missing. `_row_to_model` above no
+                    # longer raises on the case that did it; this is the guarantee rather
+                    # than the repair, and it names the row instead of swallowing it.
+                    log.warning("lookup: skipping %s %s — %s", *key, exc)
         results, missing, seen = [], [], set()
         for item in req.items:
             key = (item.media_type, item.tmdb_id)
