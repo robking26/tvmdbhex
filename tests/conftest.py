@@ -40,3 +40,18 @@ def to_jpeg(img: Image.Image) -> bytes:
     buf = io.BytesIO()
     img.save(buf, "JPEG", quality=95)
     return buf.getvalue()
+
+
+def make_logo_png(colour=(230, 30, 60), size=(300, 90)) -> bytes:
+    """A transparent PNG with blocky 'letters', like a TMDB title logo."""
+    from PIL import ImageDraw
+
+    img = Image.new("RGBA", size, (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    for i in range(5):
+        x = 10 + i * 58
+        d.rectangle([x, 10, x + 40, size[1] - 10], fill=colour + (255,))
+        d.rectangle([x + 12, 25, x + 28, size[1] - 25], fill=(0, 0, 0, 0))
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()

@@ -44,6 +44,13 @@ CREATE TABLE IF NOT EXISTS titles (
     error           TEXT,
     attempts        INTEGER NOT NULL DEFAULT 0,
     palette_version INTEGER,
+    base_hex        TEXT,
+    identity1_hex   TEXT,
+    identity2_hex   TEXT,
+    highlight1_hex  TEXT,
+    highlight2_hex  TEXT,
+    accent_hex      TEXT,
+    logo_path       TEXT,
     updated_at      TEXT    NOT NULL,
     PRIMARY KEY (media_type, tmdb_id)
 );
@@ -56,9 +63,13 @@ CREATE TABLE IF NOT EXISTS sync_state (
 );
 """
 
+SEMANTIC_ROLES = ("base", "identity1", "identity2", "highlight1", "highlight2", "accent")
+ADDED_COLUMNS = ("palette_version INTEGER",) + tuple(f"{r}_hex TEXT" for r in SEMANTIC_ROLES) + ("logo_path TEXT",)
+
 TITLE_COLUMNS = (
     "media_type, tmdb_id, title, poster_path, primary_hex, primary_ratio, "
-    "secondary_hex, secondary_ratio, tertiary_hex, tertiary_ratio, status, updated_at"
+    "secondary_hex, secondary_ratio, tertiary_hex, tertiary_ratio, status, updated_at, "
+    "palette_version, logo_path, " + ", ".join(f"{r}_hex" for r in SEMANTIC_ROLES)
 )
 
 
@@ -183,16 +194,32 @@ def ensure_schema(conn: Connection) -> None:
 
 
 def _migrate(conn: Connection) -> None:
-    """Add columns introduced after a database was created."""
+    """Add columns introduced after a database was created (metadata-only, cheap)."""
     if conn.dialect == "postgres":
-        conn.execute("ALTER TABLE titles ADD COLUMN IF NOT EXISTS palette_version INTEGER")
-        conn.execute("DROP INDEX IF EXISTS idx_titles_poster")  # no longer used
+        # Only ALTER/DROP when something is actually missing: both take an
+        # exclusive lock even when there's nothing to do, which would block
+        # (or be blocked by) the API and ingester sharing the table.
+        existing = {
+            r[0]
+            for r in conn.execute(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = 'titles'"
+            )
+        }
+        missing = [col for col in ADDED_COLUMNS if col.split()[0] not in existing]
+        for col in missing:
+            conn.execute(f"ALTER TABLE titles ADD COLUMN IF NOT EXISTS {col}")
+        stale = conn.execute("SELECT 1 FROM pg_indexes WHERE indexname = 'idx_titles_poster'").fetchone()
+        if stale:
+            conn.execute("DROP INDEX IF EXISTS idx_titles_poster")  # no longer used
         conn.commit()
         return
-    conn.execute("DROP INDEX IF EXISTS idx_titles_poster")
-    columns = {r[1] for r in conn.execute("PRAGMA table_info(titles)")}
-    if "palette_version" not in columns:
-        conn.execute("ALTER TABLE titles ADD COLUMN palette_version INTEGER")
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(titles)")}
+    missing = [col for col in ADDED_COLUMNS if col.split()[0] not in existing]
+    for col in missing:
+        conn.execute(f"ALTER TABLE titles ADD COLUMN {col}")
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'idx_titles_poster'").fetchone():
+        conn.execute("DROP INDEX idx_titles_poster")
+    if missing:
         conn.commit()
 
 
@@ -403,7 +430,8 @@ def save_results(conn: Connection, results: list[dict]) -> None:
     """Store processing outcomes in one transaction (two round trips per batch).
 
     Each result: media_type, tmdb_id, status and optionally title, adult,
-    poster_path, palette [(hex, ratio) x3], palette_version, error.
+    poster_path, logo_path, palette [(hex, ratio) x3], semantic {role: hex},
+    palette_version, error.
     """
     if not results:
         return
@@ -412,6 +440,7 @@ def save_results(conn: Connection, results: list[dict]) -> None:
     for r in results:
         palette = r.get("palette")
         colours = [v for swatch in palette for v in swatch] if palette else [None] * 6
+        semantic = r.get("semantic") or {}
         adult = r.get("adult")
         updates.append(
             (
@@ -419,6 +448,8 @@ def save_results(conn: Connection, results: list[dict]) -> None:
                 None if adult is None else int(adult),
                 r.get("poster_path"),
                 *colours,
+                *(semantic.get(role) for role in SEMANTIC_ROLES),
+                r.get("logo_path"),
                 r["status"],
                 r.get("error"),
                 int(r["status"] == ERROR),
@@ -445,6 +476,9 @@ def save_results(conn: Connection, results: list[dict]) -> None:
                 primary_hex = ?, primary_ratio = ?,
                 secondary_hex = ?, secondary_ratio = ?,
                 tertiary_hex = ?, tertiary_ratio = ?,
+                base_hex = ?, identity1_hex = ?, identity2_hex = ?,
+                highlight1_hex = ?, highlight2_hex = ?, accent_hex = ?,
+                logo_path = ?,
                 status = ?,
                 error = ?,
                 attempts = CASE WHEN ? = 1 THEN attempts + 1 ELSE 0 END,
@@ -456,16 +490,23 @@ def save_results(conn: Connection, results: list[dict]) -> None:
         )
 
 
-def poster_palettes(conn: Connection, palette_version: int) -> dict[str, list[tuple[str, float]]]:
-    """poster_path -> palette for every title coloured by this algorithm version,
-    to reuse without re-downloading (poster files are immutable)."""
+def poster_palettes(conn: Connection, palette_version: int) -> dict[str, dict]:
+    """"poster_path|logo_path" -> stored colours for every title coloured by this
+    algorithm version, to reuse without re-downloading (TMDB image files are
+    immutable, so the same pair always gives the same colours)."""
     rows = conn.execute(
-        "SELECT poster_path, primary_hex, primary_ratio, secondary_hex, secondary_ratio, "
-        "tertiary_hex, tertiary_ratio FROM titles "
+        "SELECT poster_path, logo_path, primary_hex, primary_ratio, secondary_hex, secondary_ratio, "
+        "tertiary_hex, tertiary_ratio, " + ", ".join(f"{r}_hex" for r in SEMANTIC_ROLES) + " FROM titles "
         "WHERE status = 'done' AND poster_path IS NOT NULL AND palette_version = ?",
         (palette_version,),
     )
-    return {r[0]: [(r[1], r[2]), (r[3], r[4]), (r[5], r[6])] for r in rows}
+    out = {}
+    for r in rows:
+        out[f"{r[0]}|{r[1] or ''}"] = {
+            "palette": [(r[2], r[3]), (r[4], r[5]), (r[6], r[7])],
+            "semantic": dict(zip(SEMANTIC_ROLES, r[8:14])),
+        }
+    return out
 
 
 def search(

@@ -47,7 +47,7 @@ class Settings:
     api_keys: frozenset[str] = field(default_factory=frozenset)
     concurrency: int = 16
     requests_per_second: float = 40.0
-    poster_size: str = "w185"
+    poster_size: str = "w342"  # enough detail to find and sample the title treatment
     include_adult: bool = False
     max_titles: int | None = None  # only ever process the N most popular titles
     debug: bool = False  # enables /debug and /v1/debug/* (palette tuning tools)

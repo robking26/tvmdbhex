@@ -6,7 +6,7 @@ from datetime import date
 import httpx
 import pytest
 import respx
-from conftest import make_poster, to_jpeg
+from conftest import make_logo_png, make_poster, to_jpeg
 
 from tvmdbhex import db, ingest
 from tvmdbhex.config import Settings
@@ -27,6 +27,7 @@ MOVIE_EXPORT = export(
     ]
 )
 TV_EXPORT = export([{"id": 1399, "original_name": "Game of Thrones", "popularity": 300.0}])
+LOGO = make_logo_png()
 POSTER = to_jpeg(make_poster([((20, 30, 120), 0.6), ((230, 40, 40), 0.25), ((240, 220, 60), 0.15)]))
 
 
@@ -41,8 +42,15 @@ def mock_tmdb():
         m.get(url__regex=r".*/exports/movie_ids_.*").respond(content=MOVIE_EXPORT)
         m.get(url__regex=r".*/exports/tv_series_ids_.*").respond(content=TV_EXPORT)
         m.get("https://api.themoviedb.org/3/movie/550").respond(
-            json={"id": 550, "title": "Fight Club", "adult": False, "poster_path": "/fc.jpg"}
+            json={
+                "id": 550, "title": "Fight Club", "adult": False, "poster_path": "/fc.jpg",
+                "images": {"logos": [
+                    {"file_path": "/fc_logo.svg", "iso_639_1": "en", "vote_average": 9},
+                    {"file_path": "/fc_logo.png", "iso_639_1": "en", "vote_average": 5},
+                ]},
+            }
         )
+        m.get(url__regex=r"https://image\.tmdb\.org/t/p/w300/fc_logo\.png").respond(content=LOGO)
         m.get("https://api.themoviedb.org/3/movie/551").respond(
             json={"id": 551, "title": "No Poster", "poster_path": None}
         )
@@ -53,7 +61,7 @@ def mock_tmdb():
         m.get("https://api.themoviedb.org/3/tv/1399").respond(
             json={"id": 1399, "name": "Game of Thrones", "poster_path": "/got.jpg"}
         )
-        m.get(url__regex=r"https://image\.tmdb\.org/t/p/w185/.*").respond(content=POSTER)
+        m.get(url__regex=r"https://image\.tmdb\.org/t/p/w\d+/(fc|got)\.jpg").respond(content=POSTER)
         yield m
 
 
@@ -83,12 +91,21 @@ def test_seed_and_process(settings, mock_tmdb):
     row = conn.execute("SELECT * FROM titles WHERE media_type='movie' AND tmdb_id=550").fetchone()
     assert row["status"] == "done"
     assert row["primary_hex"].startswith("#") and len(row["primary_hex"]) == 7
-    assert row["primary_ratio"] > row["secondary_ratio"] > row["tertiary_ratio"]
+    # Six-role palette stored; the TMDB logo (PNG preferred over SVG) was used.
+    assert all(row[f"{r}_hex"] and len(row[f"{r}_hex"]) == 7 for r in db.SEMANTIC_ROLES)
+    assert row["logo_path"] == "/fc_logo.png"
+    assert row["palette_version"] == 3
+    # Legacy colours are derived: primary = identity1, secondary = base, tertiary = accent.
+    assert (row["primary_hex"], row["secondary_hex"], row["tertiary_hex"]) == (
+        row["identity1_hex"], row["base_hex"], row["accent_hex"]
+    )
 
-    # The second title with an identical poster file reuses colours without a download.
+    # Same poster file, but 553 has no logo: its colours are computed separately
+    # (the logo feeds identity), so fc.jpg is downloaded once per poster+logo pair.
     twin = conn.execute("SELECT * FROM titles WHERE tmdb_id=553").fetchone()
-    assert twin["primary_hex"] == row["primary_hex"]
-    assert mock_tmdb.routes[-1].call_count == 2  # fc.jpg once + got.jpg once
+    assert twin["logo_path"] is None and twin["base_hex"] == row["base_hex"]
+    posters = next(r for r in mock_tmdb.routes if "fc|got" in str(r.pattern))
+    assert posters.call_count == 3  # fc.jpg with logo, fc.jpg without, got.jpg
 
     # Adult titles are skipped unless TVMDBHEX_INCLUDE_ADULT is set.
     assert conn.execute("SELECT status FROM titles WHERE tmdb_id=554").fetchone()[0] == "pending"
@@ -185,7 +202,7 @@ def test_older_palettes_are_recoloured(settings):
     db.save_result(conn, "movie", 2, status="done", poster_path="/b.jpg", palette=pal, palette_version=2)
     assert db.pending(conn, None, False, True, 5, None) == []
     assert db.pending(conn, None, False, True, 5, None, palette_version=2) == [("movie", 1)]
-    assert set(db.poster_palettes(conn, 2)) == {"/b.jpg"}
+    assert set(db.poster_palettes(conn, 2)) == {"/b.jpg|"}
 
 
 def test_migration_adds_palette_version(tmp_path):

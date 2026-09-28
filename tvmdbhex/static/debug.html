@@ -38,7 +38,10 @@
   .drop.over { border-color: var(--text); color: var(--text); }
   #summary { color: var(--muted); margin: 14px 0 8px; }
   .card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-bottom: 12px; display: grid; grid-template-columns: 170px 1fr; gap: 14px; }
-  .card > img { width: 170px; aspect-ratio: 2/3; object-fit: cover; border-radius: 6px; background: var(--surface-2); }
+  .posterwrap { position: relative; width: 170px; align-self: start; }
+  .posterwrap img { width: 170px; aspect-ratio: 2/3; object-fit: cover; border-radius: 6px; background: var(--surface-2); display: block; }
+  .logobox { position: absolute; border: 2px solid #22c55e; border-radius: 3px; box-shadow: 0 0 0 1px rgba(0,0,0,.5); }
+  .wrap6 .sw { min-width: 150px; }
   .card h2 { font-size: 15px; margin: 0 0 6px; word-break: break-all; }
   .pal { display: flex; gap: 14px; align-items: flex-start; flex-wrap: wrap; margin: 4px 0; }
   .pal .lbl { width: 34px; font-weight: 600; padding-top: 4px; }
@@ -60,20 +63,20 @@
   .err { color: var(--warn); }
   @media (max-width: 640px) {
     .card { grid-template-columns: 1fr; }
-    .card > img { width: 140px; }
+    .posterwrap, .posterwrap img { width: 140px; }
   }
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>Palette debugger</h1>
-  <p class="sub">Compare the current palette algorithm (v<span id="ver">?</span>) with the legacy one. Rows in each table are candidate clusters; highlighted rows are the picks.</p>
+  <p class="sub">Six-role semantic palette (algorithm v<span id="ver">?</span>): where each role came from, the located title treatment, and the artwork dominance ladder it consumed.</p>
 
   <div class="panel">
     <div id="drop" class="drop">Drop poster images here, or click to choose files
       <input id="files" type="file" accept="image/*" multiple hidden>
     </div>
-    <textarea id="paths" placeholder="TMDB poster paths, one per line, e.g. /iuFNMS8U5cb6xfzi51Dbkovj7vM.jpg"></textarea>
+    <textarea id="paths" placeholder="One title per line: TMDB poster path, optionally followed by its logo path, e.g. /iuFNMS8U5cb6xfzi51Dbkovj7vM.jpg /logo.png"></textarea>
     <div class="row">
       <button class="btn" id="runPaths">Analyse poster paths</button>
       <span class="meta">or</span>
@@ -117,7 +120,7 @@
 
   function summary() {
     $("#summary").textContent = stats.done
-      ? `${stats.done} analysed · primary changed on ${stats.changed} · ${stats.flagged} flagged`
+      ? `${stats.done} analysed`
       : "";
   }
 
@@ -130,36 +133,49 @@
     }).join("");
   }
 
+  const SEM = ["base", "identity1", "identity2", "highlight1", "highlight2", "accent"];
+  const SRC = { base: "upper corners", logo: "logo", artwork: "artwork", derived: "derived (flat image)" };
+  const chip = (c, extra = "") => `<span class="sw"><i class="small" style="background:${c.hex}"></i><div><code>${c.hex}</code><small>${extra}</small></div></span>`;
+
   function render(card, name, src, r) {
-    const cur = r.current;
+    const sem = r.semantic, cur = r.current;
     stats.done++;
     if (r.flags.length) stats.flagged++;
-    if (cur.palette.primary.hex !== r.legacy.primary.hex) stats.changed++;
     $("#ver").textContent = r.version;
     summary();
     card.dataset.flagged = r.flags.length ? "1" : "0";
     applyFilter(card);
+    const w = r.role_weights || {};
+    const roles = SEM.map((role) => {
+      const c = sem.roles[role];
+      const range = w[role] ? `${Math.round(w[role][0] * 100)}–${Math.round(w[role][1] * 100)}%` : "";
+      return `<div class="sw"><i class="big" style="background:${c.hex}"></i><div><b>${role}</b><br><code>${c.hex}</code><small>${SRC[c.source] || c.source} · ${range}</small></div></div>`;
+    }).join("");
+    const lg = sem.logo;
+    const box = lg.box ? `<div class="logobox" style="left:${lg.box[0] / 10}%;top:${lg.box[1] / 10}%;width:${(lg.box[2] - lg.box[0]) / 10}%;height:${(lg.box[3] - lg.box[1]) / 10}%"></div>` : "";
+    const logoCols = lg.colours.length
+      ? lg.colours.map((c) => chip(c, `${pct(c.share)} of logo${c.info.sampled ? " · sampled" : ""}`)).join("")
+      : '<span class="meta">none usable (black/white/grey, or not on this poster)</span>';
+    const ladder = sem.ladder.map((c) => chip(c, `#${c.info.rank} · ${pct(c.share)} · dom ${f(c.info.dominance)}`)).join("");
     const rows = cur.candidates.map((c) => `
       <tr class="${c.role || ""}">
-        <td><i class="chip" style="background:${c.hex}"></i><code>${c.hex}</code>${c.accent ? " ✦" : ""}</td>
+        <td><i class="chip" style="background:${c.hex}"></i><code>${c.hex}</code></td>
         <td>${pct(c.coverage)}</td><td>${f(c.lightness)}</td><td>${f(c.chroma, 3)}</td><td>${f(c.saturation)}</td>
-        <td>${f(c.distinctiveness)}</td><td>${f(c.contrast)}</td><td>${f(c.neutrality)}</td><td>${f(c.neutral_factor)}</td>
-        ${ROLES.map((role) => `<td>${f(c.scores[role], 3)}</td>`).join("")}
-        <td>${c.role || ""}</td>
+        <td>${f(c.contrast)}</td><td>${f(c.neutrality)}</td><td>${c.role || ""}</td>
       </tr>`).join("");
-    const strip = cur.candidates.map((c) => `<span style="background:${c.hex};flex:${Math.max(c.coverage, 0.006)}" title="${c.hex} ${pct(c.coverage)}"></span>`).join("");
     card.innerHTML = `
-      <img src="${src}" alt="">
+      <div class="posterwrap"><img src="${src}" alt="">${box}</div>
       <div style="min-width:0">
         <h2>${esc(name)}</h2>
-        <div class="pal"><span class="lbl">New</span>${swatches(cur.palette, "big", cur.candidates)}</div>
-        <div class="pal"><span class="lbl">Old</span>${swatches(r.legacy, "small")}</div>
-        <div class="strip">${strip}</div>
-        <ul class="flags">${r.flags.map((x) => `<li>${esc(x)}</li>`).join("") || '<li class="ok">no flags</li>'}</ul>
-        <div class="meta">colourfulness ${f(cur.colourfulness, 3)} · colour strength ${f(cur.colour_strength)} · ✦ = accent-pass candidate</div>
-        <details><summary class="meta">${cur.candidates.length} candidates · features and scores</summary>
+        <div class="pal wrap6">${roles}</div>
+        <div class="meta" style="margin-top:6px"><b>Title treatment:</b> ${esc(lg.source)}${lg.match != null ? ` · match ${f(lg.match)}` : ""}${lg.box ? " · green box = masked out of artwork" : ""}</div>
+        <div class="pal">${logoCols}</div>
+        <div class="meta"><b>Artwork dominant ladder</b> (logo masked, coverage-driven)</div>
+        <div class="pal">${ladder}</div>
+        <div class="pal"><span class="lbl">v2</span>${swatches(cur.palette, "small")}</div>
+        <details><summary class="meta">v2 candidate table</summary>
           <div class="tablewrap"><table>
-            <tr><th>colour</th><th>coverage</th><th>L</th><th>chroma</th><th>sat</th><th>distinct</th><th>contrast</th><th>neutral</th><th>penalty×</th><th>P score</th><th>S score</th><th>T score</th><th>role</th></tr>
+            <tr><th>colour</th><th>coverage</th><th>L</th><th>chroma</th><th>sat</th><th>contrast</th><th>neutral</th><th>v2 role</th></tr>
             ${rows}
           </table></div>
         </details>
@@ -199,11 +215,12 @@
     };
   }
 
-  function pathJob(path, name) {
+  function pathJob(path, name, logo) {
     const card = placeholder(name || path);
     return async () => {
       try {
-        const r = await api("/v1/debug/palette?poster_path=" + encodeURIComponent(path));
+        const q = "poster_path=" + encodeURIComponent(path) + (logo ? "&logo_path=" + encodeURIComponent(logo) : "");
+        const r = await api("/v1/debug/palette?" + q);
         render(card, name || path, "https://image.tmdb.org/t/p/w342" + path, r);
       } catch (e) {
         card.querySelector(".meta").outerHTML = `<span class="err">${esc(e.message)}</span>`;
@@ -221,15 +238,16 @@
     runAll([...e.dataTransfer.files].filter((x) => x.type.startsWith("image/")).map(fileJob));
   });
   $("#runPaths").addEventListener("click", () => {
-    const paths = $("#paths").value.split(/\s+/).map((p) => p.trim()).filter(Boolean)
-      .map((p) => (p.startsWith("/") ? p : "/" + p));
-    runAll(paths.map((p) => pathJob(p)));
+    // One title per line: poster_path, optionally followed by its logo_path.
+    const lines = $("#paths").value.split("\n").map((l) => l.trim().split(/\s+/).filter(Boolean)).filter((l) => l.length);
+    const fix = (p) => (p && !p.startsWith("/") ? "/" + p : p);
+    runAll(lines.map(([poster, logo]) => pathJob(fix(poster), null, fix(logo))));
   });
   $("#loadTop").addEventListener("click", async () => {
     try {
       const n = Math.min(Math.max(parseInt($("#topN").value, 10) || 30, 1), 200);
       const rows = await api(`/v1/top?limit=${n}`);
-      runAll(rows.filter((t) => t.poster_path).map((t) => pathJob(t.poster_path, `#${t.rank} ${t.title || ""} (${t.media_type} ${t.tmdb_id})`)));
+      runAll(rows.filter((t) => t.poster_path).map((t) => pathJob(t.poster_path, `#${t.rank} ${t.title || ""} (${t.media_type} ${t.tmdb_id})`, t.logo_path)));
     } catch (e) {
       $("#summary").textContent = "Couldn't load titles: " + e.message;
     }

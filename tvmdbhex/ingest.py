@@ -7,9 +7,10 @@ import time
 from datetime import date, timedelta
 
 from . import db
-from .colors import PALETTE_VERSION, extract_palette_from_bytes
+from . import semantic
+from .semantic import SEMANTIC_VERSION as PALETTE_VERSION
 from .config import Settings
-from .tmdb import NotFound, TMDBClient, parse_export
+from .tmdb import NotFound, TMDBClient, parse_export, pick_logo
 
 log = logging.getLogger("tvmdbhex.ingest")
 
@@ -65,10 +66,26 @@ def prune(conn: db.Connection, top: int, include_adult: bool = False) -> int:
     return deleted
 
 
-async def _palette_for(client: TMDBClient, settings: Settings, poster_path: str) -> list[tuple[str, float]]:
-    image = await client.poster(poster_path, settings.poster_size)
-    result = await asyncio.to_thread(extract_palette_from_bytes, image)
-    return [(s.hex, s.ratio) for s in result.as_list()]
+# Legacy `colors` (primary/secondary/tertiary) are derived from the semantic
+# roles so existing API consumers keep working: identity -> primary, the base
+# environment -> secondary, accent -> tertiary. Ratios are the roles' design weights.
+LEGACY_FROM_SEMANTIC = (("identity1", 0.275), ("base", 0.45), ("accent", 0.055))
+
+
+async def _colours_for(client: TMDBClient, settings: Settings, poster_path: str, logo_path: str | None) -> dict:
+    poster = await client.poster(poster_path, settings.poster_size)
+    logo = None
+    if logo_path:
+        try:
+            logo = await client.image(logo_path, "w300")
+        except Exception as exc:  # a missing logo shouldn't fail the title
+            log.info("logo %s unavailable: %s", logo_path, exc)
+    result = await asyncio.to_thread(semantic.analyse_bytes, poster, logo)
+    roles = result.hexes()
+    return {
+        "semantic": roles,
+        "palette": [(roles[role], weight) for role, weight in LEGACY_FROM_SEMANTIC],
+    }
 
 
 async def process_one(
@@ -77,12 +94,12 @@ async def process_one(
     media_type: str,
     tmdb_id: int,
     inflight: dict[str, asyncio.Task],
-    posters: dict[str, list[tuple[str, float]]],
+    posters: dict[str, dict],
 ) -> dict:
-    """Fetch one title's poster colours. Returns the result to store (no DB access)."""
+    """Fetch one title's colours. Returns the result to store (no DB access)."""
     key = {"media_type": media_type, "tmdb_id": tmdb_id}
     try:
-        details = await client.details(media_type, tmdb_id)
+        details = await client.details(media_type, tmdb_id, with_images=True)
     except NotFound:
         return {**key, "status": db.NOT_FOUND}
 
@@ -91,17 +108,20 @@ async def process_one(
     poster_path = details.get("poster_path")
     if not poster_path:
         return {**key, "status": db.NO_POSTER, "title": title, "adult": adult}
+    logo_path = pick_logo(details)
 
-    # Poster files are immutable, so colours computed once can be reused by any title.
-    palette = posters.get(poster_path)
-    if palette is None:
-        # Titles processed concurrently may share a poster file: download it once.
-        task = inflight.get(poster_path)
+    # Image files are immutable, so colours computed once for a poster+logo
+    # pair can be reused by any title using the same pair.
+    cache_key = f"{poster_path}|{logo_path or ''}"
+    colours = posters.get(cache_key)
+    if colours is None:
+        # Titles processed concurrently may share images: download them once.
+        task = inflight.get(cache_key)
         if task is None:
-            task = inflight[poster_path] = asyncio.ensure_future(_palette_for(client, settings, poster_path))
-            task.add_done_callback(lambda _: inflight.pop(poster_path, None))
-        palette = await asyncio.shield(task)
-        posters[poster_path] = palette
+            task = inflight[cache_key] = asyncio.ensure_future(_colours_for(client, settings, poster_path, logo_path))
+            task.add_done_callback(lambda _: inflight.pop(cache_key, None))
+        colours = await asyncio.shield(task)
+        posters[cache_key] = colours
 
     return {
         **key,
@@ -109,7 +129,9 @@ async def process_one(
         "title": title,
         "adult": adult,
         "poster_path": poster_path,
-        "palette": palette,
+        "logo_path": logo_path,
+        "palette": colours["palette"],
+        "semantic": colours["semantic"],
         "palette_version": PALETTE_VERSION,
     }
 

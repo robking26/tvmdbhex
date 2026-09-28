@@ -29,14 +29,31 @@ class Colors(BaseModel):
     tertiary: Swatch
 
 
+class SemanticPalette(BaseModel):
+    """Six-role palette. Approximate prominence in generated artwork: base
+    40-50%, identity1 25-30%, identity2 10-20%, highlight1 10-20%,
+    highlight2 10-20%, accent 3-8%."""
+
+    base: str = Field(examples=["#0D83C2"], description="Upper-corner environment of the poster")
+    identity1: str = Field(examples=["#E91919"], description="Main title/logo colour, else strongest artwork colour")
+    identity2: str = Field(examples=["#FFE65A"], description="Second logo colour, else next strongest artwork colour")
+    highlight1: str = Field(examples=["#937279"], description="Strongest artwork colour not used above")
+    highlight2: str = Field(examples=["#CC9B6B"], description="Next strongest unused artwork colour")
+    accent: str = Field(examples=["#653178"], description="Next unused artwork colour, leaning vivid")
+
+
 class TitleColors(BaseModel):
     rank: int | None = Field(None, description="Popularity rank (only in /v1/top)")
     media_type: MediaType
     tmdb_id: int
     title: str | None
     poster_path: str | None
+    logo_path: str | None = Field(None, description="TMDB title logo used for identity colours, if any")
     status: str = Field(description="done | pending | no_poster | not_found | error")
-    colors: Colors | None
+    palette: SemanticPalette | None = Field(
+        None, description="Six-role semantic palette; null until the title is coloured by algorithm v3"
+    )
+    colors: Colors | None = Field(None, description="Legacy 3-colour palette (derived from `palette` for v3 titles)")
     updated_at: str
 
 
@@ -73,12 +90,17 @@ def _row_to_model(row: db.Row) -> TitleColors:
     if row["status"] == db.DONE and all(hex_ and ratio is not None for hex_, ratio in swatches):
         primary, secondary, tertiary = (Swatch(hex=h, ratio=r) for h, r in swatches)
         colors = Colors(primary=primary, secondary=secondary, tertiary=tertiary)
+    # Same rule for the six-role palette: all six stored, or null.
+    roles = {role: row[f"{role}_hex"] for role in db.SEMANTIC_ROLES}
+    palette = SemanticPalette(**roles) if row["status"] == db.DONE and all(roles.values()) else None
     return TitleColors(
         media_type=row["media_type"],
         tmdb_id=row["tmdb_id"],
         title=row["title"],
         poster_path=row["poster_path"],
+        logo_path=row["logo_path"],
         status=row["status"],
+        palette=palette,
         colors=colors,
         updated_at=row["updated_at"],
     )
@@ -97,7 +119,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(
         title="tvmdbhex",
         version=__version__,
-        description="Primary, secondary and tertiary poster colours (hex) for TMDB movies and TV series.",
+        description="Six-role semantic palettes (base, identity1, identity2, highlight1, highlight2, accent) "
+        "for TMDB movies and TV series, from each poster's title treatment and artwork.",
     )
 
     # Postgres: one connection per instance, reused across (serverless) requests.
@@ -279,30 +302,43 @@ def _add_debug_routes(app: FastAPI, require_key) -> None:
     def debug_page() -> str:
         return debug_html
 
+    image_path = r"^/[A-Za-z0-9_.-]+\.(jpg|jpeg|png|webp)$"
+
+    def fetch(path: str, size: str) -> bytes:
+        import httpx
+
+        try:
+            resp = httpx.get(f"https://image.tmdb.org/t/p/{size}{path}", timeout=20, follow_redirects=True)
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f"Could not fetch {path}: {exc}") from exc
+        return resp.content
+
     @app.post("/v1/debug/palette", dependencies=[Depends(require_key)], tags=["debug"])
-    async def debug_palette_upload(request: Request) -> dict:
+    async def debug_palette_upload(
+        request: Request,
+        logo_path: str | None = Query(None, pattern=image_path, description="TMDB logo to use for the title treatment"),
+    ) -> dict:
         """Analyse an uploaded poster (raw image bytes as the request body):
-        candidates, features, role scores, legacy vs current palette, flags."""
+        six-role palette with logo location, logo/artwork queues and the
+        dominant ladder, plus the previous algorithms for comparison."""
         from .palette_debug import compare_bytes
 
         data = await request.body()
         if not data or len(data) > MAX_DEBUG_IMAGE_BYTES:
             raise HTTPException(status_code=400, detail="Send an image (max 10 MB) as the request body")
+        logo = fetch(logo_path, "w300") if logo_path else None
         try:
-            return compare_bytes(data)
+            return compare_bytes(data, logo)
         except Exception as exc:  # unreadable image
             raise HTTPException(status_code=400, detail=f"Could not analyse image: {exc}") from exc
 
     @app.get("/v1/debug/palette", dependencies=[Depends(require_key)], tags=["debug"])
-    def debug_palette_tmdb(poster_path: str = Query(pattern=r"^/[A-Za-z0-9_.-]+\.(jpg|jpeg|png|webp)$")) -> dict:
-        """Analyse a TMDB poster by its poster_path (fetched from TMDB's image CDN)."""
-        import httpx
-
+    def debug_palette_tmdb(
+        poster_path: str = Query(pattern=image_path),
+        logo_path: str | None = Query(None, pattern=image_path),
+    ) -> dict:
+        """Analyse a TMDB poster (and optionally its logo) fetched from TMDB's image CDN."""
         from .palette_debug import compare_bytes
 
-        try:
-            resp = httpx.get(f"https://image.tmdb.org/t/p/w342{poster_path}", timeout=20, follow_redirects=True)
-            resp.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail=f"Could not fetch poster: {exc}") from exc
-        return compare_bytes(resp.content)
+        return compare_bytes(fetch(poster_path, "w342"), fetch(logo_path, "w300") if logo_path else None)

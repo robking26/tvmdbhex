@@ -178,8 +178,8 @@ def test_debug_routes_only_when_enabled(tmp_path):
     assert on.get("/debug").status_code == 200
     img = to_jpeg(make_poster([((120, 190, 235), 0.6), ((236, 64, 152), 0.3), ((250, 250, 250), 0.1)]))
     body = on.post("/v1/debug/palette", content=img, headers={"Content-Type": "image/jpeg"}).json()
-    assert set(body) == {"version", "current", "legacy", "flags"}
-    assert body["current"]["palette"]["primary"]["hex"].startswith("#")
-    assert body["current"]["candidates"][0]["scores"]
+    assert {"version", "semantic", "current", "legacy", "flags"} <= set(body)
+    assert set(body["semantic"]["palette"]) == {"base", "identity1", "identity2", "highlight1", "highlight2", "accent"}
+    assert body["semantic"]["ladder"] and body["semantic"]["logo"]["source"] in ("tmdb-located", "tmdb", "detected", "none")
     assert on.post("/v1/debug/palette", content=b"not an image").status_code == 400
     assert on.get("/v1/debug/palette?poster_path=../../etc/passwd").status_code == 422

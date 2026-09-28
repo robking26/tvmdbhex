@@ -123,6 +123,14 @@
   .bar i { display: block; height: 100%; background: var(--muted); }
   .swatch .pct { font-size: 12px; color: var(--muted); margin-top: 4px; }
   .preview { border-radius: 10px; padding: 18px; font-weight: 600; font-size: 18px; }
+  .roles { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 18px; }
+  .roles .swatch { grid-template-columns: 52px 1fr; gap: 10px; }
+  .roles .swatch .chip { height: 52px; }
+  .roles .swatch .hex { font-size: 16px; }
+  .compose { position: relative; height: 92px; border-radius: 10px; display: flex; gap: 0; padding: 0 0 0 45%; overflow: hidden; border: 1px solid var(--line); }
+  .compose > div { height: 100%; }
+  .compose span { position: absolute; left: 14px; bottom: 10px; font-weight: 700; font-size: 17px; max-width: 40%; }
+  @media (max-width: 640px) { .roles { grid-template-columns: 1fr; } }
   .preview small { display: block; font-weight: 400; font-size: 13px; margin-top: 4px; opacity: .85; }
   .row { display: flex; gap: 8px; flex-wrap: wrap; }
   .empty { color: var(--muted); padding: 40px 0; text-align: center; }
@@ -187,7 +195,16 @@
   const PAGE = 60;
   const TOP = 1000; // the default view is the top 1,000; search reaches everything else
   const IMG = "https://image.tmdb.org/t/p/";
-  const ROLES = ["primary", "secondary", "tertiary"];
+  const ROLES = ["primary", "secondary", "tertiary"];  // legacy 3-colour palette
+  // Six-role palette, with approximate prominence in generated artwork.
+  const SEMANTIC = [
+    ["base", 0.45, "40–50%", "Upper-corner environment"],
+    ["identity1", 0.275, "25–30%", "Main title/logo colour"],
+    ["identity2", 0.15, "10–20%", "Second identity colour"],
+    ["highlight1", 0.15, "10–20%", "Strongest remaining artwork colour"],
+    ["highlight2", 0.15, "10–20%", "Next artwork colour"],
+    ["accent", 0.055, "3–8%", "Accent"],
+  ];
   const STATUS_TEXT = {
     pending: "Not processed yet",
     no_poster: "No poster on TMDB",
@@ -226,14 +243,17 @@
     return res.json();
   }
 
+  // [{role, hex, weight, range, note}] — six roles when available, else legacy three.
   function swatches(t) {
-    return t.colors ? ROLES.map((r) => t.colors[r]) : [];
+    if (t.palette) return SEMANTIC.map(([role, weight, range, note]) => ({ role, hex: t.palette[role], weight, range, note }));
+    if (t.colors) return ROLES.map((role) => ({ role, hex: t.colors[role].hex, weight: t.colors[role].ratio, range: `${(t.colors[role].ratio * 100).toFixed(1)}% of poster`, note: "" }));
+    return [];
   }
 
   function posterBlock(t, size) {
     const sw = swatches(t);
     const bg = sw.length
-      ? `linear-gradient(160deg, ${sw[0].hex} 0%, ${sw[0].hex} 45%, ${sw[1].hex} 75%, ${sw[2].hex} 100%)`
+      ? `linear-gradient(160deg, ${sw[0].hex} 0%, ${sw[0].hex} 45%, ${sw[1].hex} 75%, ${sw[2].hex} 100%)`  // placeholder while the poster loads
       : "var(--surface-2)";
     const img = showPosters.checked && t.poster_path
       ? `<img loading="lazy" alt="" src="${IMG}${size}${esc(t.poster_path)}" onerror="this.remove()">`
@@ -245,8 +265,7 @@
   function strip(t) {
     const sw = swatches(t);
     if (!sw.length) return `<div class="strip" style="background:var(--surface-2)"></div>`;
-    const total = sw.reduce((a, s) => a + (s.ratio || 0), 0) || 1;
-    return `<div class="strip">${sw.map((s) => `<span style="background:${s.hex};flex:${Math.max((s.ratio || 0) / total, 0.08)}" title="${s.hex}"></span>`).join("")}</div>`;
+    return `<div class="strip">${sw.map((s) => `<span style="background:${s.hex};flex:${Math.max(s.weight, 0.05)}" title="${s.role} ${s.hex}"></span>`).join("")}</div>`;
   }
 
   function card(t) {
@@ -260,7 +279,7 @@
       <div class="meta">
         <div class="t">${esc(t.title || "Untitled")}</div>
         <div class="s">${t.media_type === "tv" ? "TV" : "Movie"} · ${t.tmdb_id}</div>
-        ${sw.length ? `<div class="hexes mono">${sw.map((s) => `<span>${s.hex}</span>`).join("")}</div>` : `<span class="badge">${esc(STATUS_TEXT[t.status] || t.status)}</span>`}
+        ${sw.length ? `<div class="hexes mono">${sw.slice(0, 3).map((s) => `<span title="${s.role}">${s.hex}</span>`).join("")}</div>` : `<span class="badge">${esc(STATUS_TEXT[t.status] || t.status)}</span>`}
       </div>
     </button>`;
   }
@@ -308,22 +327,28 @@
 
   function detailHTML(t) {
     const sw = swatches(t);
-    const rows = sw.map((s, i) => `
+    const rows = sw.map((s) => `
       <div class="swatch">
         <div class="chip" style="background:${s.hex}"></div>
         <div>
-          <div class="role">${ROLES[i]}</div>
+          <div class="role">${s.role}${s.note ? ` · <span style="text-transform:none;letter-spacing:0">${s.note}</span>` : ""}</div>
           <button class="hex mono" data-copy="${s.hex}" title="Copy">${s.hex}</button>
-          <div class="bar"><i style="width:${(s.ratio * 100).toFixed(1)}%;background:${s.hex}"></i></div>
-          <div class="pct">${(s.ratio * 100).toFixed(1)}% of poster</div>
+          <div class="bar"><i style="width:${Math.min(s.weight / 0.5, 1) * 100}%;background:${s.hex}"></i></div>
+          <div class="pct">${s.range}${t.palette ? " of the design" : ""}</div>
         </div>
       </div>`).join("");
-    const preview = sw.length ? `
-      <div class="preview" style="background:${sw[0].hex};color:${readable(sw[0].hex)};border-left:8px solid ${sw[1].hex};box-shadow: inset 0 -6px 0 ${sw[2].hex}">
-        ${esc(t.title || "Untitled")}
-        <small>Preview: primary background, secondary and tertiary accents</small>
+    // Mock-up using the roles at their target prominence.
+    const byRole = Object.fromEntries(sw.map((s) => [s.role, s.hex]));
+    const preview = t.palette ? `
+      <div class="compose" style="background:${byRole.base}">
+        <div style="flex:27.5;background:${byRole.identity1}"></div>
+        <div style="flex:15;background:${byRole.identity2}"></div>
+        <div style="flex:13;background:${byRole.highlight1}"></div>
+        <div style="flex:13;background:${byRole.highlight2}"></div>
+        <div style="flex:5.5;background:${byRole.accent}"></div>
+        <span style="color:${readable(byRole.base)}">${esc(t.title || "Untitled")}</span>
       </div>` : "";
-    const json = sw.length ? JSON.stringify({ primary: sw[0].hex, secondary: sw[1].hex, tertiary: sw[2].hex }) : "";
+    const json = t.palette ? JSON.stringify(Object.fromEntries(SEMANTIC.map(([r]) => [r, t.palette[r]])), null, 1).replace(/\n\s*/g, " ") : "";
     return `
       <button class="close" aria-label="Close">×</button>
       <div class="detail">
@@ -333,7 +358,7 @@
             <h2>${esc(t.title || "Untitled")}</h2>
             <div class="sub">${t.media_type === "tv" ? "TV series" : "Movie"} · TMDB ${t.tmdb_id}${t.updated_at ? " · updated " + esc(t.updated_at.slice(0, 10)) : ""}</div>
           </div>
-          ${sw.length ? rows : `<div class="badge" style="font-size:13px;padding:4px 10px">${esc(STATUS_TEXT[t.status] || t.status)}</div>`}
+          ${sw.length ? `<div class="roles">${rows}</div>` : `<div class="badge" style="font-size:13px;padding:4px 10px">${esc(STATUS_TEXT[t.status] || t.status)}</div>`}
           ${preview}
           <div class="row">
             ${json ? `<button class="btn" data-copy='${json}'>Copy JSON</button>` : ""}

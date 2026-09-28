@@ -20,7 +20,7 @@ is on Vercel.
    and inserts each one as `pending`.
 2. **Process**: for each pending title (most popular first) it calls
    `/movie/{id}` or `/tv/{id}` to get `poster_path` and downloads the poster
-   (`w185` by default). It then extracts the three dominant colours. Titles that
+   (`w342` by default) and the title's TMDB logo. It then builds the six-role palette. Titles that
    share a poster file are only downloaded once.
 3. **Sync**: TMDB's `/movie/changes` and `/tv/changes` endpoints re-queue titles
    edited since the last run, so new posters get new colours.
@@ -28,45 +28,68 @@ is on Vercel.
 `tvmdbhex run` does all three steps. Run it daily. It is resumable: stop it at
 any time and the next run carries on from where it stopped.
 
-### Colour selection
+### Colour selection: six-role semantic palette (v3)
 
-Each poster gets three colours with distinct jobs, chosen roughly the way a
-designer would, not simply the three biggest areas:
+Every title gets six colours, each with a job:
 
-- **primary**: the identity colour. It should be vivid, distinctive, in
-  contrast with its surroundings, and actually present in the poster.
-  Barbie → pink, even though the blue sky covers more of the poster.
-- **secondary**: the strongest supporting or environmental colour, driven
-  mostly by coverage (Barbie → the blue).
-- **tertiary**: an accent that stands apart from both (It → the yellow
-  raincoat next to black and the red balloon).
+```json
+{
+  "base": "#2CC1FB",
+  "identity1": "#EE0DA4",
+  "identity2": "#FBBBD8",
+  "highlight1": "#D4F0F5",
+  "highlight2": "#F49C70",
+  "accent": "#8E4C37"
+}
+```
 
-How it works (`tvmdbhex/colors.py`):
+| Role | Prominence in generated artwork | Comes from |
+|---|---|---|
+| base | 40–50% | Environment meeting the two upper corners (top ~18% band) |
+| identity1 | 25–30% | Main title/logo colour, else the strongest (non-neutral) artwork colour |
+| identity2 | 10–20% | Second logo colour, else the next strongest artwork colour |
+| highlight1 | 10–20% | Strongest artwork colour not used yet |
+| highlight2 | 10–20% | Next unused artwork colour |
+| accent | 3–8% | Next unused artwork colour, leaning a little towards vivid and distinctive |
 
-1. **Candidates.** The poster is downscaled to 60×90 and converted to OKLab,
-   a perceptual colour space. Deterministic k-means finds ~12 clusters. Then:
-   - Near-duplicates merge, so a gradient sky is one colour, and all
-     near-blacks count as one black.
-   - An *accent pass* rescues small vivid details that k-means averaged away,
-     such as a yellow dress on a purple poster.
-2. **Features per candidate.** Coverage (with mild centre weighting), OKLCH
-   chroma, saturation and lightness; distinctiveness from the rest of the
-   poster; local contrast against neighbouring regions; and neutrality (grey,
-   near-black, near-white, beige/brown).
-3. **Poster colourfulness** (average chroma) decides how much vividness counts
-   at all. On a black-and-white or muted poster, vividness weight shifts to
-   presence and neutral penalties fade out. So The Witch stays black, Roma
-   stays black-and-white with its yellow title as the accent, and a
-   predominantly black poster (Kingsman) keeps black as its identity.
-4. **Role scores** pick primary, then secondary, then tertiary. Each pick must
-   be at least 0.12 apart in OKLab distance, and loses points for repeating
-   an earlier pick's hue family (so yellow is not paired with mustard). The
-   distance threshold only relaxes when the poster has nothing better.
+How it works (`tvmdbhex/semantic.py`):
 
-Every weight, threshold and penalty is in one `PaletteConfig` object, with
-comments explaining each value. The output is deterministic and takes about
-30 ms per poster. `PALETTE_VERSION` is stored with each title, and the
-ingester re-colours titles made by an older version.
+1. **Title treatment.** TMDB's official logo for the title (a transparent PNG,
+   English or language-neutral) is fetched with the details request. It is
+   *located* on the poster by multi-scale edge matching, with a size-aware
+   threshold so small templates can't match random texture. On the 44-poster
+   test set this finds 35 logos with no false locations.
+   - **Located:** logo colours are the TMDB logo's colours confirmed under the
+     letters on the poster. They are topped up with the poster's own letter
+     pixels, minus the surrounding background.
+   - **Not located** (the poster restacks or restyles the title): the TMDB
+     logo's colours are used only if the poster really contains them.
+   - **No TMDB logo:** a text-block detector finds the most title-like block of
+     letters (31/35 correct, 0 wrong on the test set). The letter colours are
+     the ones concentrated inside the block compared with just outside it.
+
+   White, black and neutral grey logo colours don't count. Cream, gold, beige,
+   deep navy, dark red and metallic silver do. Near-identical logo colours
+   merge into one.
+2. **Artwork.** With the title masked out, the poster is clustered in OKLab
+   (16 clusters, near-duplicates merged, all near-blacks one black). The
+   clusters are ranked into a coverage-driven *dominant ladder*: pixel
+   coverage, spatial coverage, coherence and region size first, with a little
+   vividness in later slots.
+3. **Roles** are filled from two queues: logo colours first for identity,
+   otherwise the artwork ladder. Highlights and accent then take the next
+   *unused* ladder colours, so the ladder shifts depending on how many
+   identity colours the logo supplied. Every assignment must be perceptually
+   distinct (OKLab distance) from all earlier roles. The threshold only
+   relaxes for genuinely monochrome art; a last-resort tint of base is used
+   only for a completely flat image.
+
+The legacy `colors` field (primary/secondary/tertiary) is still returned,
+derived from the new roles: identity1, base and accent. Tunables live in
+`SemanticConfig`. It is deterministic and takes about 120 ms per poster.
+
+The previous 3-colour algorithm (v2, `tvmdbhex/colors.py`) and the original
+area-ranking (v1, `colors_legacy.py`) remain for comparison in the debug tools.
 
 #### Tuning tools
 
@@ -109,7 +132,7 @@ runs `tvmdbhex run` once a day, both sharing the same database volume.
 | `TVMDBHEX_API_KEYS` | *(empty = no auth)* | Comma-separated keys accepted in `X-API-Key` |
 | `TVMDBHEX_CONCURRENCY` | `16` | Parallel workers |
 | `TVMDBHEX_REQUESTS_PER_SECOND` | `40` | TMDB API rate cap (TMDB allows ~50/s) |
-| `TVMDBHEX_POSTER_SIZE` | `w185` | Poster size downloaded for analysis |
+| `TVMDBHEX_POSTER_SIZE` | `w342` | Poster size downloaded for analysis (logos are fetched at w300) |
 | `TVMDBHEX_INCLUDE_ADULT` | `false` | Also process titles flagged adult |
 | `TVMDBHEX_DEBUG` | `false` | Enables `/debug` and `/v1/debug/*` palette tuning tools |
 | `TVMDBHEX_MAX_TITLES` | *(no cap)* | Only ever process the N most popular titles (the Vercel ingest workflow uses 500000). Titles below the cap stay `pending` |

@@ -53,22 +53,32 @@ def flags(analysis: colors.Analysis, image: Image.Image) -> list[str]:
     return out
 
 
-def compare(image: Image.Image) -> dict:
-    """Legacy vs current palette, candidate details and review flags."""
-    analysis = colors.analyse(image)
+def compare(image: Image.Image, logo: Image.Image | None = None) -> dict:
+    """Current six-role palette (with logo location, queues and ladder), plus the
+    previous 3-colour algorithm and legacy area-ranking for comparison."""
+    from . import semantic
+
+    sem = semantic.analyse(image, logo)
+    previous = colors.analyse(image)
     legacy = colors_legacy.extract_palette(image)
     return {
-        "version": colors.PALETTE_VERSION,
-        "current": analysis.to_dict(),
+        "version": semantic.SEMANTIC_VERSION,
+        "semantic": sem.to_dict(),
+        "role_weights": semantic.ROLE_WEIGHTS,
+        "current": previous.to_dict(),  # v2 three-colour palette, for comparison
         "legacy": {
             role: {"hex": s.hex, "ratio": s.ratio}
             for role, s in zip(("primary", "secondary", "tertiary"), legacy.as_list())
         },
-        "flags": flags(analysis, image),
+        "flags": flags(previous, image),
     }
 
 
-def compare_bytes(data: bytes) -> dict:
+def compare_bytes(data: bytes, logo: bytes | None = None) -> dict:
     with Image.open(io.BytesIO(data)) as img:
         img.load()
+        if logo:
+            with Image.open(io.BytesIO(logo)) as lg:
+                lg.load()
+                return compare(img, lg)
         return compare(img)

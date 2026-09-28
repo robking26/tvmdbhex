@@ -3,7 +3,8 @@
     python tools/palette_report.py <fixtures_dir> report.html
 
 <fixtures_dir> holds poster images plus an optional manifest.json (as written
-by tools/fetch_fixtures.py); without a manifest every image in the folder is used.
+by tools/fetch_fixtures.py, including TMDB logo files); without a manifest every
+image in the folder is used (no logos, so titles are found by text detection).
 For each poster the report shows the poster, every candidate cluster with its
 features and role scores, legacy vs new picks, and automatic review flags.
 """
@@ -23,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tvmdbhex.palette_debug import compare  # noqa: E402
 
 ROLES = ("primary", "secondary", "tertiary")
+SEMANTIC = ("base", "identity1", "identity2", "highlight1", "highlight2", "accent")
 
 
 def _swatch(hex_: str, label: str = "", big: bool = False) -> str:
@@ -37,10 +39,11 @@ def render(entries: list[dict], out: Path) -> None:
     rows, summary = [], {"flagged": 0, "changed_primary": 0, "ms": []}
     for e in entries:
         img = Image.open(e["path"]).convert("RGB")
+        logo = Image.open(e["logo"]) if e.get("logo") else None
         t = time.perf_counter()
-        r = compare(img)
+        r = compare(img, logo)
         summary["ms"].append((time.perf_counter() - t) * 1000)
-        cur, leg = r["current"], r["legacy"]
+        cur, leg, sem = r["current"], r["legacy"], r["semantic"]
         if r["flags"]:
             summary["flagged"] += 1
         if cur["palette"]["primary"]["hex"] != leg["primary"]["hex"]:
@@ -71,8 +74,10 @@ def render(entries: list[dict], out: Path) -> None:
   <div class="main">
     <h2>{html.escape(e.get('name', Path(e['path']).stem))} <small>{html.escape(e.get('category', ''))}</small></h2>
     {f"<p class='expect'>Expected: {html.escape(e['expect'])}</p>" if e.get('expect') else ''}
-    <div class="pal"><b>New</b>{''.join(_swatch(cur['palette'][role]['hex'], role, True) for role in ROLES)}</div>
-    <div class="pal old"><b>Old</b>{''.join(_swatch(leg[role]['hex'], role) for role in ROLES)}</div>
+    <div class="pal"><b>v3</b>{''.join(_swatch(sem['palette'][role], f"{role} ({sem['sources'][role]})", True) for role in SEMANTIC)}</div>
+    <p class="meta">title treatment: {sem['logo']['source']} · logo colours: {', '.join(c['hex'] for c in sem['logo']['colours']) or 'none usable'} · ladder: {' '.join(c['hex'] for c in sem['ladder'])}</p>
+    <div class="pal old"><b>v2</b>{''.join(_swatch(cur['palette'][role]['hex'], role) for role in ROLES)}</div>
+    <div class="pal old"><b>v1</b>{''.join(_swatch(leg[role]['hex'], role) for role in ROLES)}</div>
     <div class="strip">{strip}</div>
     <ul class="flags">{flags}</ul>
     <p class="meta">colourfulness {cur["colourfulness"]:.3f} · colour strength {cur["colour_strength"]:.2f}</p>
@@ -113,7 +118,10 @@ tr.primary{{background:#fef3c7}} tr.secondary{{background:#e0f2fe}} tr.tertiary{
 def main(src: Path, out: Path) -> None:
     manifest = src / "manifest.json"
     if manifest.exists():
-        entries = [{**e, "path": src / e["file"]} for e in json.loads(manifest.read_text())]
+        entries = [
+            {**e, "path": src / e["file"], "logo": src / e["logo_file"] if e.get("logo_file") else None}
+            for e in json.loads(manifest.read_text())
+        ]
     else:
         entries = [{"path": p} for p in sorted(src.iterdir()) if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp")]
     render(entries, out)
