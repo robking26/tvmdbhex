@@ -6,6 +6,7 @@ Two backends with one dialect of SQL (`?` placeholders):
 """
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 from collections.abc import Iterable, Iterator
@@ -13,6 +14,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from itertools import islice
 from typing import Any
+
+log = logging.getLogger("tvmdbhex.db")
 
 MEDIA_TYPES = ("movie", "tv")
 
@@ -44,7 +47,6 @@ CREATE TABLE IF NOT EXISTS titles (
     updated_at      TEXT    NOT NULL,
     PRIMARY KEY (media_type, tmdb_id)
 );
-CREATE INDEX IF NOT EXISTS idx_titles_poster ON titles (poster_path);
 CREATE INDEX IF NOT EXISTS idx_titles_popularity ON titles (status, popularity DESC);
 CREATE INDEX IF NOT EXISTS idx_titles_type_popularity ON titles (status, media_type, popularity DESC);
 
@@ -184,8 +186,10 @@ def _migrate(conn: Connection) -> None:
     """Add columns introduced after a database was created."""
     if conn.dialect == "postgres":
         conn.execute("ALTER TABLE titles ADD COLUMN IF NOT EXISTS palette_version INTEGER")
+        conn.execute("DROP INDEX IF EXISTS idx_titles_poster")  # no longer used
         conn.commit()
         return
+    conn.execute("DROP INDEX IF EXISTS idx_titles_poster")
     columns = {r[1] for r in conn.execute("PRAGMA table_info(titles)")}
     if "palette_version" not in columns:
         conn.execute("ALTER TABLE titles ADD COLUMN palette_version INTEGER")
@@ -209,7 +213,9 @@ def transaction(conn: Connection) -> Iterator[Connection]:
 
 
 def upsert_seed(conn: Connection, media_type: str, rows: Iterable[dict]) -> int:
-    """Insert titles from a TMDB export. Existing rows keep their colours."""
+    """Insert titles from a TMDB export. Existing rows keep their colours, and
+    unchanged rows aren't rewritten (every rewrite leaves a dead row behind
+    until vacuum, which counts against hosted database size limits)."""
     ts = now_iso()
     count = 0
     for batch in _batches(rows):
@@ -222,6 +228,9 @@ def upsert_seed(conn: Connection, media_type: str, rows: Iterable[dict]) -> int:
                     title = COALESCE(titles.title, excluded.title),
                     adult = excluded.adult,
                     popularity = excluded.popularity
+                WHERE titles.popularity IS DISTINCT FROM excluded.popularity
+                   OR titles.adult IS DISTINCT FROM excluded.adult
+                   OR titles.title IS NULL
                 """,
                 [
                     (
@@ -240,21 +249,46 @@ def upsert_seed(conn: Connection, media_type: str, rows: Iterable[dict]) -> int:
 
 
 def requeue(conn: Connection, media_type: str, ids: Iterable[int]) -> int:
-    """Mark titles as pending (inserting unknown ones) so they get re-processed."""
-    ts = now_iso()
+    """Flag changed titles for re-processing (existing rows only).
+
+    Coloured titles keep serving their current colours but are marked as an
+    outdated palette version, so the next run re-colours them; titles without
+    colours go back to pending. Unknown IDs are ignored: new titles arrive via
+    the daily seed, which respects the catalogue cap.
+    """
     count = 0
     for batch in _batches(ids):
         with transaction(conn):
             conn.executemany(
                 """
-                INSERT INTO titles (media_type, tmdb_id, status, updated_at)
-                VALUES (?, ?, 'pending', ?)
-                ON CONFLICT (media_type, tmdb_id) DO UPDATE SET status = 'pending', attempts = 0
+                UPDATE titles SET
+                    palette_version = CASE WHEN status = 'done' THEN NULL ELSE palette_version END,
+                    status = CASE WHEN status = 'done' THEN 'done' ELSE 'pending' END,
+                    attempts = 0
+                WHERE media_type = ? AND tmdb_id = ?
                 """,
-                [(media_type, int(tmdb_id), ts) for tmdb_id in batch],
+                [(media_type, int(tmdb_id)) for tmdb_id in batch],
             )
         count += len(batch)
     return count
+
+
+def rank_titles(rows: Iterable, include_adult: bool = False) -> list:
+    """Order titles the way the whole service ranks them: movies and TV
+    alternating, each by popularity (their scales differ). `rows` are tuples
+    starting (media_type, tmdb_id, popularity, adult, ...). Adult titles are
+    left out unless include_adult."""
+    by_type: dict[str, list] = {m: [] for m in MEDIA_TYPES}
+    for r in rows:
+        if include_adult or not r[3]:
+            by_type[r[0]].append(r)
+    for items in by_type.values():
+        items.sort(key=lambda r: (r[2] is None, -(r[2] or 0.0), r[1]))
+    ranked: list = []
+    movies, shows = by_type["movie"], by_type["tv"]
+    for i in range(max(len(movies), len(shows))):
+        ranked.extend(x[i] for x in (movies, shows) if i < len(x))
+    return ranked
 
 
 def pending(
@@ -275,32 +309,90 @@ def pending(
     returned too, so they get re-coloured.
     """
     statuses = {PENDING} | ({ERROR} if retry_errors else set())
-    sql = "SELECT media_type, tmdb_id, status, attempts, palette_version FROM titles WHERE 1 = 1"
+    sql = "SELECT media_type, tmdb_id, popularity, adult, status, attempts, palette_version FROM titles"
     params: list = []
     if media_type:
-        sql += " AND media_type = ?"
+        sql += " WHERE media_type = ?"
         params.append(media_type)
-    if not include_adult:
-        sql += " AND adult = 0"
-    sql += " ORDER BY popularity IS NULL, popularity DESC, tmdb_id"
-    by_type: dict[str, list] = {m: [] for m in MEDIA_TYPES}
-    for r in conn.execute(sql, params):
-        by_type[r[0]].append((r[0], r[1], r[2], r[3], r[4]))
-    # Movie and TV popularity scores aren't on the same scale, so rank each type
-    # separately and alternate: the Nth most popular movie next to the Nth TV series.
-    ranked: list = []
-    movies, shows = by_type["movie"], by_type["tv"]
-    for i in range(max(len(movies), len(shows))):
-        ranked.extend(x[i] for x in (movies, shows) if i < len(x))
+    ranked = rank_titles(conn.execute(sql, params), include_adult)
     if top:
         ranked = ranked[:top]
+
     def todo(status: str, attempts: int, version: int | None) -> bool:
         if status in statuses and attempts < max_attempts:
             return True
         return palette_version is not None and status == DONE and (version or 1) < palette_version
 
-    out = [(m, i) for m, i, status, attempts, version in ranked if todo(status, attempts, version)]
+    out = [(r[0], r[1]) for r in ranked if todo(r[4], r[5], r[6])]
     return out[:limit] if limit else out
+
+
+def prune(conn: Connection, top: int, include_adult: bool = False) -> int:
+    """Delete titles ranked below `top` that have no colours, then vacuum.
+
+    Coloured titles are always kept (even if their rank has slipped), so
+    nothing Hoozat already uses disappears. Returns the number deleted.
+    """
+    rows = list(conn.execute("SELECT media_type, tmdb_id, popularity, adult, status FROM titles"))
+    keep = {(r[0], r[1]) for r in rank_titles(rows, include_adult)[:top]}
+    doomed = [(r[0], r[1]) for r in rows if r[4] != DONE and (r[0], r[1]) not in keep]
+    for batch in _batches(doomed):
+        with transaction(conn):
+            conn.executemany("DELETE FROM titles WHERE media_type = ? AND tmdb_id = ?", batch)
+    if doomed:
+        try:
+            if len(doomed) > 0.2 * len(rows):
+                compact(conn)
+            else:
+                vacuum(conn)
+        except Exception as exc:  # autovacuum will get there; deleted space is reusable anyway
+            log.warning("vacuum failed: %s", exc)
+    return len(doomed)
+
+
+SECONDARY_INDEXES = ("idx_titles_status", "idx_titles_popularity", "idx_titles_type_popularity")
+
+
+def compact(conn: Connection) -> None:
+    """Shrink the table on disk after a large delete.
+
+    Plain VACUUM only makes space reusable; the files keep their size, and
+    hosted Postgres (Neon) counts file size against its limit. VACUUM FULL
+    rewrites the table but needs room for the copy, which a full database
+    doesn't have, so drop the secondary indexes first (freeing their files),
+    rewrite, then recreate the indexes, now sized for the smaller table.
+    """
+    if conn.dialect != "postgres":
+        vacuum(conn)
+        return
+    raw = conn._conn
+    raw.commit()
+    previous, raw.autocommit = raw.autocommit, True
+    try:
+        for name in SECONDARY_INDEXES:
+            raw.execute(f"DROP INDEX IF EXISTS {name}")
+        try:
+            raw.execute("VACUUM (FULL, ANALYZE) titles")
+        finally:
+            raw.autocommit = previous
+            ensure_schema(conn)  # recreates the indexes
+    finally:
+        raw.autocommit = previous
+
+
+def vacuum(conn: Connection) -> None:
+    """Make space from deleted/updated rows reusable (must run outside a transaction)."""
+    if conn.dialect == "postgres":
+        raw = conn._conn
+        raw.commit()
+        previous, raw.autocommit = raw.autocommit, True
+        try:
+            raw.execute("VACUUM (ANALYZE) titles")
+        finally:
+            raw.autocommit = previous
+    else:
+        conn.commit()
+        conn.execute("VACUUM")
 
 
 def save_result(conn: Connection, media_type: str, tmdb_id: int, **fields: Any) -> None:

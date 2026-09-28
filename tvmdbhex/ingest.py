@@ -17,22 +17,52 @@ MAX_ATTEMPTS = 5
 CHANGES_MAX_WINDOW = 14  # days per TMDB /changes call
 
 
-async def seed(conn: db.Connection, client: TMDBClient, media_types: list[str]) -> dict:
-    """Load every title ID from TMDB's daily exports into the database."""
-    counts = {}
+async def seed(
+    conn: db.Connection,
+    client: TMDBClient,
+    media_types: list[str],
+    top: int | None = None,
+    include_adult: bool = False,
+) -> dict:
+    """Load title IDs from TMDB's daily exports into the database.
+
+    With `top`, only the N most popular titles (movies and TV alternating, as
+    ranked everywhere else) are stored; the rest of the catalogue would only
+    ever be "pending", and storing ~1.5M such rows is what fills a small
+    hosted database.
+    """
+    exports: dict[str, tuple] = {}
     for media_type in media_types:
         day, payload = await client.daily_export(media_type)
         if db.get_state(conn, f"seed:{media_type}") == day.isoformat():
             log.info("%s export for %s already loaded", media_type, day)
-            counts[media_type] = 0
             continue
-        counts[media_type] = db.upsert_seed(conn, media_type, parse_export(media_type, payload))
+        exports[media_type] = (day, list(parse_export(media_type, payload)))
+    if not exports:
+        return {m: 0 for m in media_types}
+
+    keep: set[tuple[str, int]] | None = None
+    if top:
+        rows = [(m, r["id"], r.get("popularity"), r.get("adult")) for m, (_, items) in exports.items() for r in items]
+        keep = {(r[0], r[1]) for r in db.rank_titles(rows, include_adult)[:top]}
+
+    counts = {m: 0 for m in media_types}
+    for media_type, (day, items) in exports.items():
+        if keep is not None:
+            items = [r for r in items if (media_type, r["id"]) in keep]
+        counts[media_type] = db.upsert_seed(conn, media_type, items)
         db.set_state(conn, f"seed:{media_type}", day.isoformat())
         # The export is a snapshot; changes since then are picked up by sync_changes.
         if db.get_state(conn, f"changes:{media_type}") is None:
             db.set_state(conn, f"changes:{media_type}", day.isoformat())
         log.info("seeded %d %s titles from %s export", counts[media_type], media_type, day)
     return counts
+
+
+def prune(conn: db.Connection, top: int, include_adult: bool = False) -> int:
+    deleted = db.prune(conn, top, include_adult)
+    log.info("pruned %d uncoloured titles ranked below the top %d", deleted, top)
+    return deleted
 
 
 async def _palette_for(client: TMDBClient, settings: Settings, poster_path: str) -> list[tuple[str, float]]:

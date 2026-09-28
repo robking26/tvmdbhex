@@ -135,7 +135,7 @@ def test_rate_limit_is_retried(settings, mock_tmdb, monkeypatch):
 
 def test_sync_changes_requeues(settings, mock_tmdb):
     route = mock_tmdb.get("https://api.themoviedb.org/3/movie/changes").respond(
-        json={"results": [{"id": 550}, {"id": 9999}], "page": 1, "total_pages": 1}
+        json={"results": [{"id": 550}, {"id": 551}, {"id": 9999}], "page": 1, "total_pages": 1}
     )
 
     async def go():
@@ -146,10 +146,13 @@ def test_sync_changes_requeues(settings, mock_tmdb):
         return conn, counts
 
     conn, counts = run(go())
-    assert counts == {"movie": 2}
     assert route.call_count == 2  # 26 days split into 14-day windows
-    assert conn.execute("SELECT status FROM titles WHERE tmdb_id=550").fetchone()[0] == "pending"
-    assert conn.execute("SELECT status FROM titles WHERE tmdb_id=9999").fetchone()[0] == "pending"
+    row = lambda i: conn.execute("SELECT status, palette_version FROM titles WHERE tmdb_id=?", (i,)).fetchone()  # noqa: E731
+    # Coloured title keeps serving colours but is flagged for re-colouring.
+    assert tuple(row(550)) == ("done", None)
+    assert db.pending(conn, None, False, True, 5, None, palette_version=2)[:1] == [("movie", 550)]
+    assert row(551)[0] == "pending"  # no_poster -> retried
+    assert row(9999) is None  # unknown IDs aren't inserted (seed handles new titles)
     assert db.get_state(conn, "changes:movie") == "2026-09-27"
 
 
@@ -194,3 +197,31 @@ def test_migration_adds_palette_version(tmp_path):
     old.close()
     conn = db.connect(str(path))
     assert "palette_version" in {r[1] for r in conn.execute("PRAGMA table_info(titles)")}
+
+
+
+def test_seed_with_top_stores_only_top_titles(settings, mock_tmdb):
+    async def go():
+        conn = db.connect(settings.db_target)
+        async with TMDBClient(read_token="t", requests_per_second=0) as client:
+            counts = await ingest.seed(conn, client, ["movie", "tv"], top=3)
+        return conn, counts
+
+    conn, counts = run(go())
+    # Ranking: movie 550 (60.1), tv 1399, movie 551 (1.0); adult 554 is excluded.
+    assert counts == {"movie": 2, "tv": 1}
+    assert {(r[0], r[1]) for r in conn.execute("SELECT media_type, tmdb_id FROM titles")} == {
+        ("movie", 550), ("tv", 1399), ("movie", 551)
+    }
+
+
+def test_prune_deletes_uncoloured_titles_below_cap(settings):
+    conn = db.connect(settings.db_target)
+    db.upsert_seed(conn, "movie", [{"id": i, "popularity": 100 - i} for i in range(1, 7)])
+    db.upsert_seed(conn, "movie", [{"id": 50, "popularity": 1, "adult": True}])
+    # A coloured title whose rank has slipped below the cap is kept.
+    db.save_result(conn, "movie", 6, status="done", palette=[("#000000", 1.0)] * 3, palette_version=2)
+    assert db.prune(conn, top=3) == 3  # movies 4, 5 and adult 50
+    left = sorted(r[0] for r in conn.execute("SELECT tmdb_id FROM titles"))
+    assert left == [1, 2, 3, 6]
+    assert db.prune(conn, top=3) == 0
