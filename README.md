@@ -13,6 +13,56 @@ TMDB ──(ingester)──> database ──(read-only API + website)──> Hoo
 The database is SQLite locally, or Postgres when `DATABASE_URL` is set, as it
 is on Vercel.
 
+## For Hoozat: colours from TheTVDB (current)
+
+Hoozat now gets its colours from a second pipeline that uses **TheTVDB instead of TMDB**.
+
+```
+TheTVDB ──(tvmdbhex tvdb run, GitHub Actions)──> Hoozat API ──> Cloudflare D1 ──> each scan
+```
+
+**Why TheTVDB:**
+- Hoozat's credits come from TheTVDB, so colours keyed by TheTVDB ID match every credit directly.
+  The TMDB pipeline could only colour credits that had been mapped to a TMDB ID.
+- It takes TMDB out of Hoozat's stack.
+
+**Nothing here is hosted.**
+- The pipeline runs daily on GitHub Actions (free, because this repository is public).
+- Its state is one SQLite file kept in the Actions cache.
+- Finished colours go to the Hoozat API (`PUT /v1/colours`), which keeps them in Cloudflare D1
+  on the free plan.
+
+**Each run:**
+1. **`seed`**: pages through every TheTVDB series and movie (name, score, poster).
+   - A new poster queues the title to be coloured again.
+   - A title that disappears from TheTVDB has its colours deleted from Hoozat.
+2. **`process`**: downloads each poster (the small `_t` copy where there is one) and the English
+   ClearLogo, then runs the same six-role algorithm as below.
+   - Order: best-scored first, series and movies alternating.
+   - It stops at `--max-minutes`, and the next run carries on.
+3. **`export`**: sends new results to Hoozat, best-scored first.
+   - It sends at most `--max-writes` (80,000 by default), because D1's free plan allows 100,000
+     row writes a day.
+   - The first fill therefore takes a few days.
+
+```bash
+export TVDB_API_KEY=…            # and TVDB_PIN if your key needs one
+export COLOURS_WRITE_KEY=…       # the same value as the Hoozat API's secret
+tvmdbhex tvdb run --max-minutes 60
+tvmdbhex tvdb stats
+```
+
+**Setup on GitHub:** add the repository secrets `TVDB_API_KEY`, `TVDB_PIN` (if needed) and
+`COLOURS_WRITE_KEY`, then run **Actions → TheTVDB colours** (`.github/workflows/tvdb.yml`).
+After that it runs daily.
+
+**Licence:** TheTVDB is free under $50k a year in revenue, with attribution. The colours are
+derived from its artwork, but no artwork is shown. Check this with a lawyer before launch, as
+with the TMDB-derived colours.
+
+The TMDB pipeline and the Vercel API below still work. Hoozat no longer needs them once the
+TheTVDB store is filled.
+
 ## How it works
 
 1. **Seed**: downloads TMDB's [daily ID exports](https://developer.themoviedb.org/docs/daily-id-exports)

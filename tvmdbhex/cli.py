@@ -7,9 +7,12 @@ import dataclasses
 import json
 import logging
 
-from . import db, ingest
+import os
+
+from . import db, ingest, tvdb_ingest
 from .config import Settings
 from .tmdb import TMDBClient
+from .tvdb import TVDBClient
 
 
 def _media_types(value: str) -> list[str]:
@@ -55,6 +58,34 @@ async def _run(args: argparse.Namespace, settings: Settings) -> dict:
     raise ValueError(args.command)
 
 
+async def _run_tvdb(args: argparse.Namespace, settings: Settings) -> dict:
+    """`tvmdbhex tvdb <action>`: the TheTVDB pipeline that feeds Hoozat."""
+    os.makedirs(os.path.dirname(os.path.abspath(settings.tvdb_db_path)), exist_ok=True)
+    conn = tvdb_ingest.connect(settings.tvdb_db_path)
+    try:
+        if args.action == "stats":
+            return tvdb_ingest.stats(conn)
+        result: dict = {}
+        if args.action in ("export", "run") and not settings.colours_write_key:
+            raise SystemExit("Set COLOURS_WRITE_KEY (the same value as the Hoozat API's secret) to export")
+        if args.action in ("seed", "process", "run"):
+            async with TVDBClient(settings.tvdb_api_key, settings.tvdb_pin, settings.tvdb_requests_per_second) as client:
+                if args.action in ("seed", "run"):
+                    result["seed"] = await tvdb_ingest.seed(conn, client)
+                if args.action in ("process", "run"):
+                    result["process"] = await tvdb_ingest.process(
+                        conn, client, settings.concurrency, args.limit, args.max_minutes
+                    )
+        if args.action in ("export", "run"):
+            result["export"] = await tvdb_ingest.export(
+                conn, settings.colours_url, settings.colours_write_key, args.max_writes
+            )
+        result["stats"] = tvdb_ingest.stats(conn)
+        return result
+    finally:
+        conn.close()
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="tvmdbhex")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -80,6 +111,14 @@ def main(argv: list[str] | None = None) -> None:
     prune = sub.add_parser("prune", help="Delete uncoloured titles ranked below the catalogue size and vacuum")
     prune.add_argument("--size", type=int, default=None, help="Catalogue size (default: TVMDBHEX_CATALOGUE_SIZE)")
     sub.add_parser("stats", help="Show counts by status")
+    tv = sub.add_parser("tvdb", help="TheTVDB pipeline for Hoozat: seed, process, export, run or stats")
+    tv.add_argument("action", choices=["seed", "process", "export", "run", "stats"])
+    tv.add_argument("--limit", type=int, default=None, help="Max titles to colour this run")
+    tv.add_argument("--max-minutes", type=float, default=None, help="Stop colouring after this long")
+    tv.add_argument(
+        "--max-writes", type=int, default=tvdb_ingest.DEFAULT_MAX_WRITES,
+        help="Max rows to send to Hoozat this run (Cloudflare D1 free plan: 100,000 writes a day)",
+    )
     serve = sub.add_parser("serve", help="Run the HTTP API")
     serve.add_argument("--host", default="0.0.0.0")
     serve.add_argument("--port", type=int, default=8000)
@@ -101,6 +140,9 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "stats":
         conn = db.connect(settings.db_target)
         print(json.dumps(db.stats(conn), indent=2))
+        return
+    if args.command == "tvdb":
+        print(json.dumps(asyncio.run(_run_tvdb(args, settings)), indent=2))
         return
     if args.command == "serve":
         import uvicorn

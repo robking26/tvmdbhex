@@ -1,0 +1,75 @@
+# Colours for Hoozat from TheTVDB: lists every TheTVDB series and movie, colours
+# new or changed posters, and sends the results to the Hoozat API (Cloudflare D1).
+# Nothing is hosted here: the pipeline's state is one SQLite file kept in the
+# Actions cache between runs.
+#
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   TVDB_API_KEY       - TheTVDB v4 API key (and TVDB_PIN if the key needs one)
+#   COLOURS_WRITE_KEY  - the same value as the Hoozat API's COLOURS_WRITE_KEY secret
+# Optional repository variable:
+#   HOOZAT_COLOURS_URL - defaults to https://hoozat-api.hoozat.workers.dev/v1/colours
+name: TheTVDB colours
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Max titles to colour this run (blank = as many as time allows)"
+        required: false
+      max_writes:
+        description: "Max colours to send to Hoozat (Cloudflare D1 free plan: 100,000 writes a day)"
+        required: false
+        default: "80000"
+
+concurrency:
+  group: tvdb
+  cancel-in-progress: false
+
+jobs:
+  colours:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      TVMDBHEX_TVDB_DB_PATH: data/tvdb.db
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install .
+      - name: Check secrets
+        env:
+          TVDB_API_KEY: ${{ secrets.TVDB_API_KEY }}
+          COLOURS_WRITE_KEY: ${{ secrets.COLOURS_WRITE_KEY }}
+        run: |
+          if [ -z "$TVDB_API_KEY" ]; then echo "::error::Add the TVDB_API_KEY repository secret"; exit 1; fi
+          if [ -z "$COLOURS_WRITE_KEY" ]; then echo "::error::Add the COLOURS_WRITE_KEY repository secret"; exit 1; fi
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: data
+          key: tvdb-state-${{ github.run_id }}
+          restore-keys: tvdb-state-
+      - name: Seed, colour and export
+        env:
+          TVDB_API_KEY: ${{ secrets.TVDB_API_KEY }}
+          TVDB_PIN: ${{ secrets.TVDB_PIN }}
+          COLOURS_WRITE_KEY: ${{ secrets.COLOURS_WRITE_KEY }}
+          HOOZAT_COLOURS_URL: ${{ vars.HOOZAT_COLOURS_URL }}
+        # Stops colouring in time to export and save state before the 6h job limit.
+        run: >
+          tvmdbhex tvdb run --max-minutes 300
+          --max-writes ${{ inputs.max_writes || '80000' }}
+          ${{ inputs.limit && format('--limit {0}', inputs.limit) || '' }}
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data
+          key: tvdb-state-${{ github.run_id }}
+      - name: Summary
+        if: always()
+        run: tvmdbhex tvdb stats | tee -a "$GITHUB_STEP_SUMMARY"
