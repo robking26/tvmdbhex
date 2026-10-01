@@ -55,6 +55,13 @@ class Settings:
     # separate from max_titles, so a small test run can never shrink the catalogue.
     catalogue_size: int | None = None
     debug: bool = False  # enables /debug and /v1/debug/* (palette tuning tools)
+    # TheTVDB pipeline (`tvmdbhex tvdb ...`): colours keyed by TheTVDB ID, pushed to Hoozat.
+    tvdb_api_key: str = ""
+    tvdb_pin: str = ""
+    tvdb_db_path: str = "data/tvdb.db"
+    tvdb_requests_per_second: float = 20.0
+    colours_url: str = "https://hoozat-api.hoozat.workers.dev/v1/colours"
+    colours_write_key: str = ""
 
     @property
     def db_target(self) -> str:
@@ -84,4 +91,12 @@ class Settings:
                 int(os.environ["TVMDBHEX_CATALOGUE_SIZE"]) if os.environ.get("TVMDBHEX_CATALOGUE_SIZE") else None
             ),
             debug=_bool(os.environ.get("TVMDBHEX_DEBUG")),
+            tvdb_api_key=os.environ.get("TVDB_API_KEY", "").strip(),
+            tvdb_pin=os.environ.get("TVDB_PIN", "").strip(),
+            tvdb_db_path=os.environ.get("TVMDBHEX_TVDB_DB_PATH", cls.tvdb_db_path),
+            tvdb_requests_per_second=float(
+                os.environ.get("TVMDBHEX_TVDB_REQUESTS_PER_SECOND", cls.tvdb_requests_per_second)
+            ),
+            colours_url=os.environ.get("HOOZAT_COLOURS_URL", cls.colours_url).strip() or cls.colours_url,
+            colours_write_key=os.environ.get("COLOURS_WRITE_KEY", "").strip(),
         )
